@@ -13,9 +13,15 @@ Correspondence: [catherine@eleuther.ai](mailto:catherine@eleuther.ai)
 
 <br>
 
-[![VISTA-130M](https://img.shields.io/badge/VISTA--130M-FFD21E?logo=huggingface&logoColor=black)](https://huggingface.co/collections/shikhar-srivastava/vista-130m)
-&nbsp;
-[![VISTA-350M](https://img.shields.io/badge/VISTA--350M-FFD21E?logo=huggingface&logoColor=black)](https://huggingface.co/collections/shikhar-srivastava/vista-350m)
+<p>
+🤗 <b>Models:</b>
+<a href="https://huggingface.co/collections/shikhar-srivastava/vista-130m">VISTA-130M</a> &nbsp;·&nbsp;
+<a href="https://huggingface.co/collections/shikhar-srivastava/vista-350m">VISTA-350M</a>
+&nbsp;&nbsp;|&nbsp;&nbsp;
+🤗 <b>Data:</b>
+<a href="https://huggingface.co/datasets/catherinearnett/montok">Tokenizers</a> &nbsp;·&nbsp;
+<a href="https://huggingface.co/datasets/goldfish-models/fish-food">Corpora</a>
+</p>
 
 </div>
 
@@ -37,15 +43,6 @@ rather than tokens, so that models differing only in their tokenizer stay compar
 | Languages | English, Thai, Urdu, Amharic, Vietnamese | English, Thai, Urdu, Amharic, Vietnamese |
 | Algorithms | BPE, Unigram | BPE, Unigram |
 | Vocabulary sizes | 8192, 16384, 32768, 49152, 65536, 81920, 98304, 114688, 262144 | 8192, 32768, 65536, 98304 |
-
-<div align="center">
-
-[**VISTA-130M**](https://huggingface.co/collections/shikhar-srivastava/vista-130m) &nbsp;·&nbsp;
-[**VISTA-350M**](https://huggingface.co/collections/shikhar-srivastava/vista-350m) &nbsp;·&nbsp;
-[**Tokenizers**](https://huggingface.co/datasets/catherinearnett/montok) &nbsp;·&nbsp;
-[**Corpora**](https://huggingface.co/datasets/goldfish-models/fish-food)
-
-</div>
 
 ### Byte-premium matching
 
