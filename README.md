@@ -13,12 +13,13 @@ Correspondence: [catherine@eleuther.ai](mailto:catherine@eleuther.ai)
 
 <br>
 
-[![VISTA-130M](https://img.shields.io/badge/Models-VISTA--130M-FFD21E?style=for-the-badge&logo=huggingface&logoColor=000&labelColor=4A4A4A)](https://huggingface.co/collections/shikhar-srivastava/vista-130m)
-[![VISTA-350M](https://img.shields.io/badge/Models-VISTA--350M-FFD21E?style=for-the-badge&logo=huggingface&logoColor=000&labelColor=4A4A4A)](https://huggingface.co/collections/shikhar-srivastava/vista-350m)
+[![VISTA-130M](https://img.shields.io/badge/VISTA--130M-FFD21E?logo=huggingface&logoColor=black)](https://huggingface.co/collections/shikhar-srivastava/vista-130m)
+&nbsp;
+[![VISTA-350M](https://img.shields.io/badge/VISTA--350M-FFD21E?logo=huggingface&logoColor=black)](https://huggingface.co/collections/shikhar-srivastava/vista-350m)
 
 </div>
 
----
+<br>
 
 This repository is the end-to-end training pipeline for the **VISTA model suite**, covering data
 acquisition, byte-premium matching, tokenization and pretraining. It reproduces every checkpoint
@@ -27,8 +28,6 @@ released above.
 VISTA models are LLaMA-style decoders trained from scratch across a grid of **languages ×
 tokenization algorithms × vocabulary sizes**. Each language's training data is matched in *bytes*
 rather than tokens, so that models differing only in their tokenizer stay comparable.
-
----
 
 ## VISTA Suite
 
@@ -65,8 +64,6 @@ a comparable quantity of content:
 Premiums and split sizes live in `configs/monolingual_bp_index.json` and are applied by
 `scripts/create_bp_splits.py`.
 
----
-
 ## Setup
 
 ```bash
@@ -96,8 +93,6 @@ $DATA_ROOT/
 ```
 
 Everything inside the repo resolves relative to the checkout, so it works from any location.
-
----
 
 ## Data
 
@@ -147,8 +142,6 @@ python scripts/tokenize_and_pack.py \
   --split train --max_seq_len 1024 --max_segments -1 \
   --prepend_cls True --include_sep True --shuffle True
 ```
-
----
 
 ## Training
 
@@ -247,8 +240,6 @@ export WANDB_PROJECT=my-project
 Both are pre-norm LLaMA with RMSNorm, SwiGLU (SiLU) and rotary position embeddings. The `vocab_size`
 in the config files is a placeholder; the trainer sets it from the tokenizer in use.
 
----
-
 ## Repository layout
 
 ```
@@ -272,8 +263,6 @@ in the config files is a placeholder; the trainer sets it from the tokenizer in 
 ├── monolingual_130m_gold.sh       130M trainer, Goldfish-matched (sweep default)
 └── monolingual_350m.sh            350M trainer
 ```
-
----
 
 ## Acknowledgments
 
