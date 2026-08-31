@@ -1,30 +1,23 @@
+# Machine-local configuration
 local.env
-*.cpython*
-*.pyc*
-runs/*
-1b_res_pre_lr5e-4*
-130m_res_pre_lr1e-3/*
-130m_res_post_lr1e-3/*
-130m_res_LNS_lr1e-3/*
 
-old_checkpoints/*
-130m_res_pre_*/*
-130m_res_post_*/*
-130m_res_LNS_*/*
-mono_130m_pre*/*
-debug2_130m_pre_*/*
-debug_130m_pre_*/*
-debug_mono*/*
-logs/*
-mono_gold_*/*
-coord_check_*/*/out/*
-coord_check_*/*/*/out/*
-data/shakespeare_char/*
-*.json
-*.csv
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Training outputs
+mono_130m_*/
+mono_gold_130m_*/
+mono_350m_*/
+runs/
+logs/
+wandb/
 *.log
-mutransfer_experiments/completep/out/*
---project
---filter
-mono_350m_pre_*
-wandb/*
+*.csv
+
+# Evaluation outputs
+evals/results.json
+PROGRESS.md

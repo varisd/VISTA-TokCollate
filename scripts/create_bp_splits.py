@@ -10,8 +10,8 @@ After generating files, update a JSON index in the codebase:
 
 Usage:
   python scripts/create_bp_splits.py \
-    --input_root /scratch/ssrivas9/catherinearnett/monolingual_training_data \
-    --output_root /scratch/ssrivas9/catherinearnett/monolingual_training_data_bp
+    --input_root ${DATA_ROOT}/monolingual_training_data \
+    --output_root ${DATA_ROOT}/monolingual_training_data_bp
 
 Notes:
 - BP sizes are interpreted in GiB (1024**3 bytes) for deterministic slicing.

@@ -6,7 +6,7 @@ It must define DATA_ROOT — the base directory for training data, tokenized
 data, and tokenizers on that machine.
 
 Example local.env:
-    DATA_ROOT=/scratch/ssrivas9/catherinearnett
+    DATA_ROOT=/path/to/your/data
 """
 from pathlib import Path
 

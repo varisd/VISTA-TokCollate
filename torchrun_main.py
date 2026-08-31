@@ -39,7 +39,6 @@ from peft_pretraining.modeling_llama import LlamaForCausalLM
 from utils.activation_tracker import create_activation_tracker, log_activation_summary
 from utils.enhanced_activation_tracker import create_enhanced_activation_tracker, log_enhanced_activation_summary
 from utils.weight_tracker import create_weight_tracker, log_weight_summary
-from utils.byte_consumption_plotter import log_byte_consumption_to_wandb, log_final_byte_summary
 from functools import partial
 import csv
 
@@ -672,7 +671,7 @@ def main(args):
             
     # initialize wandb without config (it is passed later)
     if global_rank == 0:
-        wandb.init(project="cod", name=args.run_name)
+        wandb.init(project=os.environ.get("WANDB_PROJECT", "vista"), name=args.run_name)
         
     logger.info(f"Using dist with rank {global_rank} (only rank 0 will log)")
     

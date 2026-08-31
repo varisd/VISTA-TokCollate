@@ -1,245 +1,261 @@
-<div align="center">
-  
-# Monolingual Language Model Training Pipeline
+# VISTA Training Pipeline
 
-A pipeline for training monolingual LLaMA models across different languages, vocabulary sizes, and tokenization approaches. 
+### No Single Tokenizer Feature Reliably Predicts Downstream Language Model Performance
 
-</div>
+*Findings of EMNLP 2026*
 
-## 🚀 Quick Start
+Training code for a controlled study of how tokenizer design affects language model quality. We
+pretrain LLaMA-style models from scratch across a grid of **languages × tokenization algorithms ×
+vocabulary sizes**, holding the training data fixed in *bytes* rather than tokens.
 
-### Prerequisites
+Holding data constant in bytes is the point. It is what makes the comparison fair across
+tokenizers, and what lets us ask whether any intrinsic tokenizer statistic — fertility,
+compression rate, vocabulary overlap — predicts downstream accuracy. None of them reliably does.
 
-Before training monolingual models, you need to download the required data:
+**Trained models:** [VISTA-130M](https://huggingface.co/collections/shikhar-srivastava/vista-130m)
+· [VISTA-350M](https://huggingface.co/collections/shikhar-srivastava/vista-350m)
 
-1. **Monolingual Training Data**: Download the preprocessed monolingual datasets
-   - Contains text files for: `eng_latn`, `tha_thai`, `urd_arab`, `amh_ethi`, `vie_latn`
+---
 
-2. **Monolingual Tokenizers**: Download the pretrained tokenizers
-   - Contains BPE and Unigram tokenizers with various vocabulary sizes
+## The sweep
 
-### Environment Setup
+| | 130M models | 350M models |
+|---|---|---|
+| Corpus | Monolingual, byte-premium matched | FineWeb (English), FineWeb-2 (others) |
+| Languages | English, Thai, Urdu, Amharic, Vietnamese | English, Thai, Urdu, Amharic, Vietnamese |
+| Algorithms | BPE, Unigram | BPE, Unigram |
+| Vocabulary sizes | 8192, 16384, 32768, 49152, 65536, 81920, 98304, 114688, 262144 | 8192, 32768, 65536, 98304 |
 
-Set up your environment using conda:
+**Byte-premium matching.** Languages are not equally compressible into UTF-8, so an equal number of
+bytes is not an equal amount of text. Each language is allotted `byte_premium ×` the English budget,
+so every model sees a comparable quantity of content:
+
+| Language | Code | Script | Byte premium | 130M train split |
+|---|---|---|---|---|
+| English | `eng_latn` | Latin | 1.00 | 1.00 GiB |
+| Vietnamese | `vie_latn` | Latin | 1.35 | 1.35 GiB |
+| Urdu | `urd_arab` | Arabic | 1.71 | 1.71 GiB |
+| Amharic | `amh_ethi` | Ethiopic | 1.72 | 1.72 GiB |
+| Thai | `tha_thai` | Thai | 2.74 | 2.74 GiB |
+
+Premiums and split sizes live in `configs/monolingual_bp_index.json` and are applied by
+`scripts/create_bp_splits.py`.
+
+---
+
+## Setup
 
 ```bash
-conda create -n multi python=3.9 -y
-conda activate multi
+conda create -n vista python=3.9 -y
+conda activate vista
 pip install -r exp_requirements.txt
 ```
 
-### Path Configuration (`local.env`)
-
-All data paths in this repo are read from a single **`local.env`** file at the
-repo root. This file is **not committed to git** — each machine gets its own
-copy.
+All data paths resolve from a single `local.env` at the repo root, which is git-ignored so each
+machine keeps its own:
 
 ```bash
 cp local.env.example local.env
-# Edit DATA_ROOT to point to your data directory
+$EDITOR local.env          # set DATA_ROOT=/path/to/your/data
 ```
 
-`local.env` defines one variable:
-
-| Variable | Description |
-|---|---|
-| `DATA_ROOT` | Base directory containing training data, tokenized data, and tokenizers |
-
-The repo expects these subdirectories under `DATA_ROOT`:
+`DATA_ROOT` is the only variable. The pipeline reads and writes these subdirectories under it:
 
 ```
 $DATA_ROOT/
-├── monolingual_training_data/            Raw text files (eng_latn.txt, ...)
-├── monolingual_training_data_bp/         Byte-premium train/eval splits
-├── monolingual_training_data_tokenized/  Tokenized training data
-└── monolingual-tokenizers/               Pretrained tokenizers
-    ├── bpe_unscaled_tokenizers/
-    └── unigram_unscaled_tokenizers/
+├── monolingual-tokenizers/               tokenizers (downloaded)
+│   ├── bpe_unscaled_tokenizers/
+│   └── unigram_unscaled_tokenizers/
+├── monolingual_training_data/            raw text, one document per line
+├── monolingual_training_data_bp/         byte-premium train/eval splits
+└── monolingual_training_data_tokenized/  packed token-id files consumed by the trainer
 ```
 
-The repo root itself is always resolved dynamically (`SCRIPT_DIR` in shell,
-`Path(__file__)` in Python), so it works from any checkout location.
+Everything inside the repo resolves relative to the checkout, so it works from any location.
 
-**Example configurations:**
+---
 
-| Machine | `DATA_ROOT` |
-|---|---|
-| Bluehive cluster | `DATA_ROOT=/scratch/ssrivas9/catherinearnett` |
-| Docker / cloud | `DATA_ROOT=/root/data` |
+## Data
 
-To download tokenizers to the right location:
+**1. Tokenizers.** All 90 tokenizers (5 languages × 2 algorithms × 9 vocabulary sizes) are published
+as a Hugging Face dataset:
 
 ```bash
 bash download_tokenizers.sh
 ```
 
-## 📊 Data Preparation
+**2. Raw text.**
 
-### Step 1: Create Byte Premium Splits
+The 130M runs use per-language monolingual corpora from
+[goldfish-models/fish-food](https://huggingface.co/datasets/goldfish-models/fish-food):
 
-Create balanced training and evaluation splits based on byte premium (BP) calculations:
+```bash
+bash download_monolingual_data.sh          # all five languages
+```
+
+The 350M runs use FineWeb and FineWeb-2:
+
+```bash
+python scripts/download_fineweb.py         # HuggingFaceFW/fineweb, sample-10BT
+bash download_fineweb2.sh                  # HuggingFaceFW/fineweb-2, four languages
+```
+
+`download_fineweb2.sh` caps the Thai and Vietnamese downloads using the tokenized English file as a
+size reference, so run the English 350M pipeline before it.
+
+**3. Byte-premium splits** (130M path only) — carves each corpus into a `byte_premium × 1 GiB` train
+split and a held-out eval split of `8000 × byte_premium` lines:
 
 ```bash
 bash create_byte_premium_sets.sh
 ```
 
-Or manually (paths default from `local.env`):
+Run this only once all five corpora are present: it regenerates
+`configs/monolingual_bp_index.json` from whichever files it finds on disk.
 
-```bash
-python scripts/create_bp_splits.py
-```
+**4. Tokenization.** Text is tokenized once per (language, algorithm, vocabulary) and packed into a
+token-ids-per-line format the trainer streams directly. The sweep scripts do this automatically; to
+run it by hand:
 
-This creates balanced datasets with the following byte premiums:
-- **English (eng_latn)**: 1.0× (1GB)
-- **Thai (tha_thai)**: 2.74× (2.94GB)
-- **Urdu (urd_arab)**: 1.71× (1.84GB)  
-- **Amharic (amh_ethi)**: 1.72× (1.85GB)
-- **Vietnamese (vie_latn)**: 1.35× (1.45GB)
-
-## 🏋️ Model Training
-
-### Monolingual Training Pipeline
-
-The pipeline supports training 130M parameter models on individual languages with various normalization techniques. Each language has its dedicated training script:
-
-#### English Training
-```bash
-bash launch_monolingual_eng.sh
-```
-
-#### Thai Training
-```bash
-bash launch_monolingual_tha.sh
-```
-
-#### Urdu Training
-```bash
-bash launch_monolingual_urd.sh
-```
-
-#### Amharic Training
-```bash
-bash launch_monolingual_amh.sh
-```
-
-#### Vietnamese Training
-```bash
-bash launch_monolingual_vie.sh
-```
-
-### Training Configuration
-
-Each monolingual training script:
-1. **Tokenizes** the data using multiple vocabulary sizes (16K, 32K, 49K, 65K, 81K)
-2. **Trains** 130M parameter models 
-3. **Supports** both BPE and Unigram tokenization (configurable in scripts)
-
-Example tokenization command (executed automatically):
 ```bash
 python scripts/tokenize_and_pack.py \
-  --dataset "eng_latn" --tokenizer_type "bpe_unscaled" --tokenizer_vocabulary "32768" \
-  --split train --max_seq_len 1024 --max_segments -1 --prepend_cls True --include_sep True --shuffle True
+  --dataset eng_latn --tokenizer_type bpe_unscaled --tokenizer_vocabulary 32768 \
+  --split train --max_seq_len 1024 --max_segments -1 \
+  --prepend_cls True --include_sep True --shuffle True
 ```
 
-Example training command (executed automatically):
+---
+
+## Training
+
+### 130M — monolingual, byte-premium matched
+
+One script covers the grid, tokenizing each cell and then training it:
+
 ```bash
-bash monolingual_130m.sh pre "eng_latn" "32768" "bpe_unscaled" 6 29510
+# One language, one algorithm, the full vocabulary sweep
+bash launch_monolingual.sh eng_latn bpe_unscaled
+
+# A single cell
+bash launch_monolingual.sh tha_thai unigram_unscaled 32768
 ```
 
-### Direct Model Training
+By default this uses the **Goldfish-matched** recipe (`monolingual_130m_gold.sh`), which is what the
+released models were trained with. Set `goldfish=False` for the higher-throughput recipe
+(`monolingual_130m.sh`):
 
-You can also train individual models directly:
+| | Goldfish-matched (default) | Alternate |
+|---|---|---|
+| Learning rate | 1e-4 | 1e-3 |
+| Batch size / device | 16 | 32 |
+| Total batch size | 64 | 512 |
+| Attention dropout | 0.1 | 0.0 |
+| Adam eps | 1e-6 | 1e-8 |
+
+Shared by both: 10 epochs, cosine schedule, 10% warmup, no weight decay, bfloat16, sequence length
+1024, 4 GPUs via `torchrun`.
+
+To train a single model directly:
 
 ```bash
-# Train English model with 32K BPE vocabulary
-bash monolingual_130m.sh pre eng_latn 32768 bpe_unscaled 6 29510
-
-# Train Thai model with 49K BPE vocabulary  
-bash monolingual_130m.sh pre tha_thai 49152 bpe_unscaled 6 29510
-
-# Train with Unigram tokenization
-bash monolingual_130m.sh pre eng_latn 32768 unigram_unscaled 6 29510
+bash monolingual_130m_gold.sh pre eng_latn 32768 bpe_unscaled 6 29510
+#                            │   │        │     │             │ └─ master port
+#                            │   │        │     │             └─── post_num
+#                            │   │        │     └─────────────────  bpe_unscaled | unigram_unscaled
+#                            │   │        └───────────────────────  vocabulary size
+#                            │   └────────────────────────────────  language code
+#                            └────────────────────────────────────  norm type — use "pre"
 ```
 
-### Parameters:
-- `norm_type`: Model configuration (use `pre` as default)
-- `dataset`: Language dataset (`eng_latn`, `tha_thai`, `urd_arab`, `amh_ethi`, `vie_latn`)
-- `vocab_size`: Tokenizer vocabulary size (`16384`, `32768`, `49152`, `65536`, `81920`)
-- `tokenizer_type`: Tokenization algorithm (`bpe_unscaled`, `unigram_unscaled`)
-- `post_num`: Configuration parameter (use `6` as default)
-- `master_port`: Port for distributed training
+### 350M — FineWeb and FineWeb-2
 
-## 🛠️ Model Architecture
+English must be built first: its tokenized output is the byte-size reference every other language is
+matched against.
 
-### 130M Model Configuration
-- **Layers**: 12 transformer blocks
-- **Hidden Size**: 768
-- **Attention Heads**: 12
-- **Intermediate Size**: 2048
-- **Max Sequence Length**: 1024
-- **Position Encoding**: RoPE (Rotary Position Embedding)
-- **Activation**: SiLU/Swish
-
-### Training Hyperparameters
-- **Learning Rate**: 1e-3
-- **Batch Size**: 32 (per device)
-- **Total Batch Size**: 512 (with gradient accumulation)
-- **Epochs**: 10
-- **Warmup Ratio**: 0.1
-- **Optimizer**: Adam
-- **Precision**: bfloat16
-
-## 📁 Project Structure
-
-```
-multilingual-eleuther/
-├── local.env.example          # Template — copy to local.env and edit
-├── local.env                  # (gitignored) Machine-local DATA_ROOT
-├── configs/                   # Model configurations
-│   ├── llama_130m.json        # 130M model config
-│   ├── llama_350m.json        # 350M model config
-│   └── monolingual_bp_index.json  # Dataset index (uses ${DATA_ROOT})
-├── scripts/                   # Data processing scripts
-│   ├── create_bp_splits.py    # Create byte premium splits
-│   ├── download_fineweb.py    # Download FineWeb dataset
-│   ├── tokenize_and_pack.py   # Tokenization pipeline
-│   └── split_tokenized.py     # Split tokenized data by token count
-├── utils/                     # Shared utilities
-│   └── local_config.py        # Reads DATA_ROOT from local.env
-├── peft_pretraining/          # Core training modules
-│   ├── modeling_llama.py      # Model implementations
-│   ├── dataloader.py          # Data loading utilities
-│   └── training_utils.py      # Training utilities
-├── launch_monolingual_*.sh    # Language-specific training scripts
-├── launch_350m_fineweb*.sh    # FineWeb 350M training scripts
-├── monolingual_130m.sh        # Core 130M training script
-├── monolingual_350m.sh        # Core 350M training script
-├── download_tokenizers.sh     # Download tokenizers from HF
-└── torchrun_main.py           # Main training entry point
+```bash
+bash launch_350m_fineweb.sh  bpe_unscaled           # English
+bash launch_350m_fineweb2.sh all bpe_unscaled       # Amharic, Thai, Urdu, Vietnamese
 ```
 
-## 🎯 Supported Languages
+Both accept an explicit vocabulary list, and `launch_350m_fineweb2.sh` accepts a single language:
 
-| Language | Script | Dataset Code | Byte Premium |
-|----------|--------|--------------|--------------|
-| English | Latin | `eng_latn` | 1.0× |
-| Thai | Thai | `tha_thai` | 2.74× |
-| Urdu | Arabic | `urd_arab` | 1.71× |
-| Amharic | Ethiopic | `amh_ethi` | 1.72× |
-| Vietnamese | Latin | `vie_latn` | 1.35× |
+```bash
+bash launch_350m_fineweb2.sh fineweb2_tha unigram_unscaled 32768 65536
+```
 
+English is trained on its first 7B tokens. For the data-scarce languages (Amharic, Urdu) the full
+corpus is smaller than the byte target, so epochs are repeated to compensate —
+`epochs = min(20, target_bytes / actual_bytes)`, computed per cell.
 
-### Hyperparameter Tuning
+The 350M recipe uses lr 1e-3, batch size 16 per device, total batch 512, gradient clipping 1.0.
 
-Modify training parameters in `monolingual_130m.sh`:
-- Learning rates: `1e-3`, `1e-4`, `5e-4`
-- Batch sizes: `16`, `32`, `64`
-- Sequence lengths: `512`, `1024`, `2048`
+### GPUs
 
-## 🙏 Acknowledgments
+All training scripts use 4 GPUs by default. Override with `NUM_GPUS`:
 
-This code is built on top of:
-- [@LayerNorm-Scaling](https://github.com/lmsdss/LayerNorm-Scaling): Core model training infrastructure
-- [@word-acquisition-language-models](https://github.com/tylerachang/word-acquisition-language-models/tree/1182df1d388be189214da0184ee04a416dec18cc): Tokenization pipeline and data processing utilities
+```bash
+NUM_GPUS=8 bash launch_350m_fineweb.sh bpe_unscaled
+```
 
-We thank the authors of these repositories for their work.
+### Logging
+
+Training logs to Weights & Biases under the project name in the `WANDB_PROJECT` environment
+variable, defaulting to `vista`. Set it to your own project before launching:
+
+```bash
+export WANDB_PROJECT=my-project
+```
+
+(It is read in `torchrun_main.py`, at the `wandb.init` call.) Checkpoints are written locally to
+`./{run_name}/`. Nothing is uploaded to the Hugging Face Hub unless you pass `--hf_repo_name` and
+`--hf_push_final` / `--hf_push_checkpoints` to `torchrun_main.py` yourself.
+
+### Architecture
+
+| | 130M | 350M |
+|---|---|---|
+| Layers | 12 | 24 |
+| Hidden size | 768 | 1024 |
+| Attention heads | 12 | 16 |
+| Intermediate size | 2048 | 2736 |
+| Sequence length | 1024 | 1024 |
+
+Both are pre-norm LLaMA with RMSNorm, SwiGLU (SiLU) and rotary position embeddings. The `vocab_size`
+in the config files is a placeholder — the trainer sets it from the tokenizer in use.
+
+---
+
+## Repository layout
+
+```
+├── torchrun_main.py               Training entry point
+├── configs/                       Model architectures and the byte-premium index
+├── peft_pretraining/              LLaMA implementation, dataloader, training utilities
+├── utils/                         Path resolution and training-time instrumentation
+├── scripts/                       Download, byte-premium splits, tokenization
+├── evals/                         Downstream evaluation suite (see evals/README.md)
+│
+├── download_tokenizers.sh         Fetch the 90 tokenizers
+├── download_monolingual_data.sh   Fetch the monolingual corpora
+├── download_fineweb2.sh           Fetch FineWeb-2 raw text
+├── create_byte_premium_sets.sh    Build byte-premium train/eval splits
+│
+├── launch_monolingual.sh          130M sweep
+├── launch_350m_fineweb.sh         350M English sweep
+├── launch_350m_fineweb2.sh        350M multilingual sweep
+│
+├── monolingual_130m.sh            130M trainer
+├── monolingual_130m_gold.sh       130M trainer, Goldfish-matched (sweep default)
+└── monolingual_350m.sh            350M trainer
+```
+
+---
+
+## Acknowledgments
+
+Built on [LayerNorm-Scaling](https://github.com/lmsdss/LayerNorm-Scaling) for the training
+infrastructure and
+[word-acquisition-language-models](https://github.com/tylerachang/word-acquisition-language-models)
+for the tokenization and packing pipeline. The monolingual corpora, the 130M training recipe and the
+FLORES evaluation follow [Goldfish](https://github.com/tylerachang/goldfish). We thank the authors of
+all three.

@@ -12,6 +12,8 @@ vocab_size=${3:-32768}
 tokenizer_type=${4:-bpe_unscaled}   # bpe_unscaled | unigram_unscaled
 export POST_NUM=${5:-6}
 export MASTER_PORT=${6:-29510}
+NUM_GPUS=${NUM_GPUS:-4}
+DEVICES=$(seq -s, 0 $((NUM_GPUS - 1)))
 
 learning_rates=1e-3
 export NORM_TYPE=$norm_type
@@ -22,9 +24,9 @@ export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=300
 run_name="mono_130m_${norm_type}_lr${learning_rates}_${monolingual_dataset}_${tokenizer_type}_${vocab_size}"
 save_dir="$run_name"
 
-echo "Training 130M with lr=$learning_rates, norm=$norm_type, dataset=$monolingual_dataset, tok=${tokenizer_type}/${vocab_size} on 4 GPUs"
+echo "Training 130M with lr=$learning_rates, norm=$norm_type, dataset=$monolingual_dataset, tok=${tokenizer_type}/${vocab_size} on ${NUM_GPUS} GPUs"
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --master_port=$MASTER_PORT torchrun_main.py \
+CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node $NUM_GPUS --master_port=$MASTER_PORT torchrun_main.py \
     --model_config configs/llama_130m.json \
     --lr $learning_rates \
     --batch_size 32 \
@@ -42,6 +44,4 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node 4 --master_port=$MASTER_P
     --monolingual-dataset $monolingual_dataset \
     --tokenizer_type $tokenizer_type \
     --tokenizer_vocabulary $vocab_size \
-    --tokenizer_name t5-base \
-    --hf_repo_name "shikhar-srivastava/${run_name}" \
-    --hf_push_final --hf_push_checkpoints
+    --tokenizer_name t5-base

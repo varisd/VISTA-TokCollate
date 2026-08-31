@@ -7,7 +7,8 @@ Tokenize BP train/eval splits using the same approach as the reference script:
 - Truncate to max_seq_len and write a single line of space-separated token ids
 - No padding on disk
 
-This mirrors: /scratch/ssrivas9/word-acquisition-language-models/scripts/tokenize_dataset.py
+This mirrors scripts/tokenize_dataset.py from:
+https://github.com/tylerachang/word-acquisition-language-models
 """
 
 import argparse

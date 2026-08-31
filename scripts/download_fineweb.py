@@ -7,7 +7,7 @@ preserved. No document-per-line assumption.
 
 Usage:
     python scripts/download_fineweb.py \
-        --output /scratch/ssrivas9/catherinearnett/monolingual_training_data/fineweb_eng.txt
+        --output ${DATA_ROOT}/monolingual_training_data/fineweb_eng.txt
 
     # For testing with a limited number of documents:
     python scripts/download_fineweb.py \
