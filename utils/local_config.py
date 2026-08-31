@@ -2,7 +2,7 @@
 Load machine-local path configuration from local.env at the repo root.
 
 local.env is not committed to git and must be created on each machine.
-It must define DATA_ROOT — the base directory for training data, tokenized
+It must define DATA_ROOT, the base directory for training data, tokenized
 data, and tokenizers on that machine.
 
 Example local.env:

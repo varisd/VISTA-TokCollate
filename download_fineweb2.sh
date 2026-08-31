@@ -2,7 +2,7 @@
 # Download FineWeb-2 raw text for Amharic, Thai, Urdu and Vietnamese.
 #
 # Amharic and Urdu are small enough to take whole. Thai and Vietnamese are huge,
-# so they are capped at 1.02 x byte_premium x (English reference bytes) — just
+# so they are capped at 1.02 x byte_premium x (English reference bytes), just
 # above what the byte-premium split will actually consume.
 #
 # Requires the English FineWeb pipeline to have been tokenized first, since the
@@ -37,11 +37,11 @@ for lang in "${LANGUAGES[@]}"; do
   bp="${BYTE_PREMIUM_MAP[$lang]:-}"
 
   if [[ -z "$bp" ]]; then
-    # Amharic / Urdu — small enough to download in full
+    # Amharic / Urdu: small enough to download in full
     echo "[Download] $lang (all available)"
     python3 "${SCRIPT_DIR}/scripts/download_fineweb2.py" --language "$lang"
   else
-    # Thai / Vietnamese — capped
+    # Thai / Vietnamese: capped
     if [[ ! -f "$ENG_REF" ]]; then
       echo "[ERROR] English reference file not found: $ENG_REF" >&2
       echo "Run: bash launch_350m_fineweb.sh bpe_unscaled 98304" >&2

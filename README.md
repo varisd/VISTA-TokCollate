@@ -1,23 +1,36 @@
-# VISTA Training Pipeline
+<div align="center">
 
-### No Single Tokenizer Feature Reliably Predicts Downstream Language Model Performance
+# VISTA Model Suite | Training Pipeline
 
-*Findings of EMNLP 2026*
+### No Single Tokenizer Feature Reliably Predicts<br>Downstream Language Model Performance
 
-Training code for a controlled study of how tokenizer design affects language model quality. We
-pretrain LLaMA-style models from scratch across a grid of **languages × tokenization algorithms ×
-vocabulary sizes**, holding the training data fixed in *bytes* rather than tokens.
+Antonio Lopardo &nbsp;·&nbsp; Luis Frentzen Salim &nbsp;·&nbsp; Shikhar Srivastava<br>
+Kevin Jiang &nbsp;·&nbsp; Mridul Sharma &nbsp;·&nbsp; Catherine Arnett
 
-Holding data constant in bytes is the point. It is what makes the comparison fair across
-tokenizers, and what lets us ask whether any intrinsic tokenizer statistic — fertility,
-compression rate, vocabulary overlap — predicts downstream accuracy. None of them reliably does.
+*Findings of the Association for Computational Linguistics: EMNLP 2026*
 
-**Trained models:** [VISTA-130M](https://huggingface.co/collections/shikhar-srivastava/vista-130m)
-· [VISTA-350M](https://huggingface.co/collections/shikhar-srivastava/vista-350m)
+Correspondence: [catherine@eleuther.ai](mailto:catherine@eleuther.ai)
+
+<br>
+
+[![VISTA-130M](https://img.shields.io/badge/Models-VISTA--130M-FFD21E?style=for-the-badge&logo=huggingface&logoColor=000&labelColor=4A4A4A)](https://huggingface.co/collections/shikhar-srivastava/vista-130m)
+[![VISTA-350M](https://img.shields.io/badge/Models-VISTA--350M-FFD21E?style=for-the-badge&logo=huggingface&logoColor=000&labelColor=4A4A4A)](https://huggingface.co/collections/shikhar-srivastava/vista-350m)
+
+</div>
 
 ---
 
-## The sweep
+This repository is the end-to-end training pipeline for the **VISTA model suite**, covering data
+acquisition, byte-premium matching, tokenization and pretraining. It reproduces every checkpoint
+released above.
+
+VISTA models are LLaMA-style decoders trained from scratch across a grid of **languages ×
+tokenization algorithms × vocabulary sizes**. Each language's training data is matched in *bytes*
+rather than tokens, so that models differing only in their tokenizer stay comparable.
+
+---
+
+## VISTA Suite
 
 | | 130M models | 350M models |
 |---|---|---|
@@ -26,9 +39,20 @@ compression rate, vocabulary overlap — predicts downstream accuracy. None of t
 | Algorithms | BPE, Unigram | BPE, Unigram |
 | Vocabulary sizes | 8192, 16384, 32768, 49152, 65536, 81920, 98304, 114688, 262144 | 8192, 32768, 65536, 98304 |
 
-**Byte-premium matching.** Languages are not equally compressible into UTF-8, so an equal number of
-bytes is not an equal amount of text. Each language is allotted `byte_premium ×` the English budget,
-so every model sees a comparable quantity of content:
+<div align="center">
+
+[**VISTA-130M**](https://huggingface.co/collections/shikhar-srivastava/vista-130m) &nbsp;·&nbsp;
+[**VISTA-350M**](https://huggingface.co/collections/shikhar-srivastava/vista-350m) &nbsp;·&nbsp;
+[**Tokenizers**](https://huggingface.co/datasets/catherinearnett/montok) &nbsp;·&nbsp;
+[**Corpora**](https://huggingface.co/datasets/goldfish-models/fish-food)
+
+</div>
+
+### Byte-premium matching
+
+Languages are not equally compressible into UTF-8, so an equal number of bytes is not an equal
+amount of text. Each language is allotted `byte_premium ×` the English budget, so every model sees
+a comparable quantity of content:
 
 | Language | Code | Script | Byte premium | 130M train split |
 |---|---|---|---|---|
@@ -87,7 +111,7 @@ bash download_tokenizers.sh
 **2. Raw text.**
 
 The 130M runs use per-language monolingual corpora from
-[goldfish-models/fish-food](https://huggingface.co/datasets/goldfish-models/fish-food):
+[`goldfish-models/fish-food`](https://huggingface.co/datasets/goldfish-models/fish-food):
 
 ```bash
 bash download_monolingual_data.sh          # all five languages
@@ -103,7 +127,7 @@ bash download_fineweb2.sh                  # HuggingFaceFW/fineweb-2, four langu
 `download_fineweb2.sh` caps the Thai and Vietnamese downloads using the tokenized English file as a
 size reference, so run the English 350M pipeline before it.
 
-**3. Byte-premium splits** (130M path only) — carves each corpus into a `byte_premium × 1 GiB` train
+**3. Byte-premium splits** (130M path only). Carves each corpus into a `byte_premium × 1 GiB` train
 split and a held-out eval split of `8000 × byte_premium` lines:
 
 ```bash
@@ -128,7 +152,7 @@ python scripts/tokenize_and_pack.py \
 
 ## Training
 
-### 130M — monolingual, byte-premium matched
+### 130M: monolingual, byte-premium matched
 
 One script covers the grid, tokenizing each cell and then training it:
 
@@ -164,10 +188,10 @@ bash monolingual_130m_gold.sh pre eng_latn 32768 bpe_unscaled 6 29510
 #                            │   │        │     └─────────────────  bpe_unscaled | unigram_unscaled
 #                            │   │        └───────────────────────  vocabulary size
 #                            │   └────────────────────────────────  language code
-#                            └────────────────────────────────────  norm type — use "pre"
+#                            └────────────────────────────────────  norm type (use "pre")
 ```
 
-### 350M — FineWeb and FineWeb-2
+### 350M: FineWeb and FineWeb-2
 
 English must be built first: its tokenized output is the byte-size reference every other language is
 matched against.
@@ -184,7 +208,7 @@ bash launch_350m_fineweb2.sh fineweb2_tha unigram_unscaled 32768 65536
 ```
 
 English is trained on its first 7B tokens. For the data-scarce languages (Amharic, Urdu) the full
-corpus is smaller than the byte target, so epochs are repeated to compensate —
+corpus is smaller than the byte target, so epochs are repeated to compensate:
 `epochs = min(20, target_bytes / actual_bytes)`, computed per cell.
 
 The 350M recipe uses lr 1e-3, batch size 16 per device, total batch 512, gradient clipping 1.0.
@@ -221,7 +245,7 @@ export WANDB_PROJECT=my-project
 | Sequence length | 1024 | 1024 |
 
 Both are pre-norm LLaMA with RMSNorm, SwiGLU (SiLU) and rotary position embeddings. The `vocab_size`
-in the config files is a placeholder — the trainer sets it from the tokenizer in use.
+in the config files is a placeholder; the trainer sets it from the tokenizer in use.
 
 ---
 
