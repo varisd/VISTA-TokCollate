@@ -1,63 +1,55 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import logging
 import os
 import sys
-from huggingface_hub import dataset_info
-from datasets import load_dataset
+from datasets import get_dataset_config_names, load_dataset
 
-# Výchozí doporučený set postavený na oficiálních ISO 639-3 kódech FineWeb-2
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+logging.getLogger("datasets").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+
+# Default Fineweb-2 language subset
 DEFAULT_LANGS = ["eng_Latn", "spa_Latn", "deu_Latn", "rus_Cyrl", "cmn_Hani"]
-DEFAULT_RATIOS = {
-    "eng_Latn": 0.32,  # Angličtina (Poznámka: FineWeb-2 odkazuje pro čistou EN na původní FineWeb, 
-    "spa_Latn": 0.17,  # ale v datasetu najdete eng_Latn pro specifické mixy textů)
-    "deu_Latn": 0.17,
-    "rus_Cyrl": 0.17,
-    "cmn_Hani": 0.17
-}
 
-# Koeficienty pro přepočet znaků na tokeny (znaky / koeficient = tokeny)
-TOKEN_ESTIMATORS = {
-    "Latn": 4.1,   # Latinka (EN, ES, DE, atd.)
-    "Cyrl": 3.8,   # Azbuka (RU, UKR, atd.)
-    "Hani": 1.5,   # Čínské znaky (CMN)
-    "Jpan": 1.7,   # Japonština
-    "Hang": 2.5,   # Korejština
-    "Arab": 3.5,   # Arabské písmo
-    "Deva": 3.2    # Devanagari (Hindština)
+# Use uniform mixing ratios as a default
+DEFAULT_RATIOS = {
+    "eng_Latn": 0.2,
+    "spa_Latn": 0.2,
+    "deu_Latn": 0.2,
+    "rus_Cyrl": 0.2,
+    "cmn_Hani": 0.2
 }
 
 
 def fetch_available_subsets():
-    """Dynamicky načte všechny dostupné subsety z Hugging Face Hubu."""
-    print("Načítám seznam jazyků přímo z Hugging Face Hubu...")
+    """Fetch all available language subsets directly from the FineWeb-2 dataset configs."""
     try:
-        info = dataset_info("HuggingFaceFW/fineweb-2", repo_type="dataset")
-        # Filtrujeme pouze platné textové subsety (vynecháváme pomocné '_removed' a 'und_')
-        subsets = sorted([
-            config.config_name for config in info.card_data.get("configs", [])
-            if config.config_name and not config.config_name.endswith("_removed") and not config.config_name.startswith("und_")
-        ])
-        if not subsets:
-            # Záložní hardcoded list pro případ výpadku HF API metadat
-            return ["deu_Latn", "spa_Latn", "fra_Latn", "rus_Cyrl", "cmn_Hani", "ces_Latn", "por_Latn", "ita_Latn"]
+        subsets = sorted(get_dataset_config_names("HuggingFaceFW/fineweb-2"))
+        subsets = [
+            subset for subset in subsets
+            if subset and not subset.endswith("_removed") and not subset.startswith("und_")
+        ]
         return subsets
     except Exception as e:
-        print(f"Varování: Nepodařilo se načíst metadata z HF Hubu: {e}", file=sys.stderr)
-        return ["deu_Latn", "spa_Latn", "fra_Latn", "rus_Cyrl", "cmn_Hani"]
+        logger.warning("Failed to load FineWeb-2 metadata from Hugging Face: %s", e)
+        return DEFAULT_LANGS
 
 
 def list_languages(available_subsets):
-    print("\n=== Dostupné jazykové subsety ve FineWeb-2 ===")
+    logger.info("\n=== Available FineWeb-2 subsets ===")
     for subset in available_subsets:
-        marker = " [VÝCHOZÍ SUSET V MIXU]" if subset in DEFAULT_LANGS else ""
-        print(f"  - {subset}{marker}")
-    print(f"\nCelkem nalezeno: {len(available_subsets)} jazykově-písmových konfigurací.")
-    print("==============================================\n")
+        marker = " [DEFAULT IN MIX]" if subset in DEFAULT_LANGS else ""
+        logger.info("  - %s%s", subset, marker)
+    logger.info("\nTotal found: %d script/language configs.", len(available_subsets))
+    logger.info("==============================================\n")
 
 
 def parse_mixing_ratios(ratio_str, selected_langs):
-    """Zpracuje poměry míchání zadané uživatelem ve formátu kód:váha,kód:váha"""
+    """Parse custom mixing ratios in the form lang:weight,lang:weight."""
     if not ratio_str:
         chosen_defaults = {l: DEFAULT_RATIOS.get(l, 1.0) for l in selected_langs}
         total = sum(chosen_defaults.values())
@@ -69,7 +61,7 @@ def parse_mixing_ratios(ratio_str, selected_langs):
         for pair in pairs:
             lang, weight = pair.split(":")
             if lang not in selected_langs:
-                print(f"Varování: Poměr pro '{lang}' byl zadán, ale jazyk není vybrán. Ignoruji.")
+                logger.warning("Ratio for '%s' was provided but the language is not selected. Ignoring.", lang)
                 continue
             ratios[lang] = float(weight)
 
@@ -82,71 +74,75 @@ def parse_mixing_ratios(ratio_str, selected_langs):
                 ratios[lang] = 0.0
         return ratios
     except Exception as e:
-        print(f"Chyba při parsování poměrů. Používám rovnoměrné rozdělení. Detail: {e}")
+        logger.error("Error parsing ratios. Falling back to uniform weighting. Detail: %s", e)
         return {l: 1.0 / len(selected_langs) for l in selected_langs}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Dynamický FineWeb-2 Multilingvální Mixer pro Tokenizer Studie")
-    parser.add_argument("--list", action="store_true", help="Vypíše všechny dostupné jazykové subsety na HF a ukončí se")
-    parser.add_argument("--langs", type=str, help="Čárkou oddělené přesné FineWeb-2 subsety (např. eng_Latn,deu_Latn,ces_Latn)")
-    parser.add_argument("--target_tokens", type=int, default=20_000_000, help="Cílový celkový počet tokenů výsledného korpusu")
-    parser.add_argument("--ratios", type=str, help="Vlastní poměry míchání, např. deu_Latn:0.5,rus_Cyrl:0.5")
-    parser.add_argument("--output", type=str, default="multilingual_corpus.jsonl", help="Název výstupního souboru (.jsonl)")
-    parser.add_argument("--min_char_len", type=int, default=200, help="Minimální délka dokumentu ve znacích")
+    parser = argparse.ArgumentParser(description="Stream and mix FineWeb-2 corpora by byte budget, not token count")
+    parser.add_argument("--list", action="store_true", help="List all available language subsets on Hugging Face and exit")
+    parser.add_argument("--langs", type=str, help="Comma-separated FineWeb-2 subset names (e.g. eng_Latn,deu_Latn,ces_Latn)")
+    parser.add_argument("--target_bytes", type=int, default=256_000_000, help="Target total byte budget for the final mixed corpus (may finish slightly under the cap)")
+    parser.add_argument("--ratios", type=str, help="Custom mixing ratios, e.g. deu_Latn:0.5,rus_Cyrl:0.5")
+    parser.add_argument("--output", type=str, default="multilingual_corpus.jsonl", help="Output file name (.jsonl)")
+    parser.add_argument("--min_char_len", type=int, default=200, help="Minimum document length in characters")
 
     args = parser.parse_args()
+    if args.target_bytes <= 0:
+        parser.error("--target_bytes must be a positive integer")
 
-    # Načtení reálného seznamu z Hugging Face
+    # Load the real list from Hugging Face.
     available_subsets = fetch_available_subsets()
 
     if args.list:
         list_languages(available_subsets)
         sys.exit(0)
 
-    # 1. Validace a výběr jazyků
+    # 1. Validate and select languages.
     if args.langs:
         selected_langs = [l.strip() for l in args.langs.split(",")]
         for l in selected_langs:
             if l not in available_subsets:
-                print(f"Chyba: Subset '{l}' neexistuje ve FineWeb-2. Spusťte skript s --list pro zobrazení všech kódů.")
+                logger.error("Subset '%s' does not exist in FineWeb-2. Run with --list to see valid codes.", l)
                 sys.exit(1)
     else:
-        print(f"Nebyly zadány žádné jazyky. Používám výchozí mix: {', '.join(DEFAULT_LANGS)}")
+        logger.info("No languages were provided. Using the default mix: %s", ", ".join(DEFAULT_LANGS))
         selected_langs = [l for l in DEFAULT_LANGS if l in available_subsets]
 
-    # 2. Nastavení vah
+    # 2. Set the weights.
     mixing_ratios = parse_mixing_ratios(args.ratios, selected_langs)
 
-    print("\nPlán složení výsledného korpusu:")
+    logger.info("\nPlanned composition of the output corpus:")
     for lang in selected_langs:
-        print(f"  - {lang}: {mixing_ratios[lang]*100:.1f}%")
-    print(f"Cílová velikost: {args.target_tokens:,} tokenů\n")
+        logger.info("  - %s: %.1f%%", lang, mixing_ratios[lang] * 100)
+    logger.info("Target size: %s bytes", f"{args.target_bytes:,}")
 
-    target_tokens_per_lang = {lang: int(args.target_tokens * mixing_ratios[lang]) for lang in selected_langs}
+    target_bytes_per_lang = {lang: int(args.target_bytes * mixing_ratios[lang]) for lang in selected_langs}
 
-    # 3. Inicializace streamování z HF
+    # 3. Initialize the streaming dataset iterators from Hugging Face.
     iterators = {}
     for lang in selected_langs:
-        print(f"Otevírám síťový stream pro: {lang}...")
+        logger.info("Opening network stream for: %s...", lang)
         try:
-            # stream=True zajistí, že stahujeme data po kusech za běhu a neukládáme gigabajty na disk
+            # stream=True ensures documents are pulled incrementally instead of downloading whole corpora to disk.
             ds = load_dataset("HuggingFaceFW/fineweb-2", name=lang, split="train", streaming=True)
             iterators[lang] = iter(ds)
         except Exception as e:
-            print(f"Chyba při připojování k subsetu {lang}: {e}")
+            logger.error("Error while connecting to subset %s: %s", lang, e)
             sys.exit(1)
 
-    # 4. Proporcionální míchání a zápis do JSONL
-    collected_tokens = {lang: 0 for lang in selected_langs}
+    # 4. Proportional mixing and JSONL output by UTF-8 byte length.
+    collected_bytes = {lang: 0 for lang in selected_langs}
+    total_written_bytes = 0
     active_langs = list(selected_langs)
+    reached_byte_cap = False
 
-    print(f"\nZahajuji stahování vzorků a zápis do {args.output}...")
+    logger.info("\nStarting sample download and writing to %s...", args.output)
 
     with open(args.output, "w", encoding="utf-8") as f_out:
-        while active_langs:
+        while active_langs and not reached_byte_cap:
             for lang in list(active_langs):
-                if collected_tokens[lang] >= target_tokens_per_lang[lang]:
+                if collected_bytes[lang] >= target_bytes_per_lang[lang]:
                     active_langs.remove(lang)
                     continue
 
@@ -157,31 +153,37 @@ def main():
                     if len(text) < args.min_char_len:
                         continue
 
-                    # Detekce písma z názvu subsetu (např. z deu_Latn získáme Latn)
-                    script_type = lang.split("_")[1] if "_" in lang else "Latn"
-                    multiplier = TOKEN_ESTIMATORS.get(script_type, 4.0)
-                    estimated_tokens = max(1, int(len(text) / multiplier))
+                    doc_bytes = len(text.encode("utf-8"))
+                    if total_written_bytes + doc_bytes > args.target_bytes:
+                        logger.info("\nReached byte cap: stopping at %s bytes (target: %s).",
+                                    f"{total_written_bytes:,}", f"{args.target_bytes:,}")
+                        reached_byte_cap = True
+                        break
 
                     output_obj = {
                         "text": text,
                         "dataset_subset": lang,
-                        "estimated_tokens": estimated_tokens
+                        "byte_length": doc_bytes
                     }
                     f_out.write(json.dumps(output_obj, ensure_ascii=False) + "\n")
 
-                    collected_tokens[lang] += estimated_tokens
+                    collected_bytes[lang] += doc_bytes
+                    total_written_bytes += doc_bytes
 
                 except StopIteration:
-                    print(f"\n[Varování] Data pro subset {lang} byla vyčerpána před dosažením limitu.")
+                    logger.warning("\nData for subset %s were exhausted before reaching the target quota.", lang)
                     active_langs.remove(lang)
 
-    print("\n=== Hotovo ===")
-    total_est_tokens = sum(collected_tokens.values())
-    print(f"Uloženo do: {os.path.abspath(args.output)}")
-    print(f"Celkem získáno tokenů (odhad): {total_est_tokens:,} / {args.target_tokens:,}")
+    logger.info("\n=== Done ===")
+    logger.info("Saved to: %s", os.path.abspath(args.output))
+    logger.info("Total UTF-8 bytes collected: %s / %s", f"{total_written_bytes:,}", f"{args.target_bytes:,}")
     for lang in selected_langs:
-        print(f"  - {lang}: {collected_tokens[lang]:,} tokenů (Cíl bol: {target_tokens_per_lang[lang]:,})")
+        logger.info("  - %s: %s bytes (target: %s)", lang, f"{collected_bytes[lang]:,}", f"{target_bytes_per_lang[lang]:,}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        # `head` closes the pipe early. Exit quietly rather than crashing.
+        pass
