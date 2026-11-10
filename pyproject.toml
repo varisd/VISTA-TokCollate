@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vista-tokcollate"
+version = "0.1.0"
+description = "Training and data pipeline for the VISTA multilingual model suite."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "VISTA contributors" }]
+keywords = ["language-models", "tokenization", "pretraining", "multilingual"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=3.8.0",
+    "ruff>=0.6.9",
+    "mypy>=1.11.0",
+    "types-PyYAML>=6.0.12",
+    "pytest>=8.0.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+include = [
+    "*.py",
+    "*.pyi",
+    "**/*.py",
+    "**/*.pyi",
+    "pyproject.toml",
+]
+exclude = [
+    "scripts/",
+    "**/scripts/**",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "W",
+    "UP",
+    "B",
+    "A",
+    "N",
+    "SIM",
+    "TID",
+    "PL",
+    "RUF",
+    "RET",
+    "ARG",
+]
+ignore = [
+    "ANN101",
+    "PLR0913",
+    "SIM108",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["E402"]
+"**/tests/*.py" = ["S101"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.9"
+files = ["."]
+exclude = ["^scripts/"]
+warn_unused_configs = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+no_implicit_optional = true
+show_error_codes = true
+pretty = true
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
