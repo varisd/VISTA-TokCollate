@@ -2,10 +2,7 @@
 import argparse
 import json
 import logging
-import random
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 from datasets import get_dataset_config_names, load_dataset
 
@@ -17,7 +14,6 @@ logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 # Default Fineweb-2 language subset
 DEFAULT_LANGS = ["eng_Latn", "spa_Latn", "deu_Latn", "rus_Cyrl", "cmn_Hani"]
-AVAILABLE_LANGUAGES_FILE = Path(__file__).with_name("fineweb2.languages.txt")
 
 # Use uniform mixing ratios as a default
 DEFAULT_RATIOS = {
@@ -29,8 +25,8 @@ DEFAULT_RATIOS = {
 }
 
 
-def refresh_available_subsets():
-    """Fetch the complete FineWeb-2 language list and persist it to the cache file."""
+def get_available_subsets():
+    """Query the live FineWeb-2 language metadata and add the English fallback."""
     try:
         subsets = sorted(get_dataset_config_names("HuggingFaceFW/fineweb-2"))
         subsets = [
@@ -43,21 +39,7 @@ def refresh_available_subsets():
 
     if "eng_Latn" not in subsets:
         subsets.append("eng_Latn")
-    ordered = sorted(set(subsets))
-    with AVAILABLE_LANGUAGES_FILE.open("w", encoding="utf-8") as f:
-        for subset in ordered:
-            f.write(f"{subset}\n")
-    return ordered
-
-
-def fetch_available_subsets():
-    """Return the cached FineWeb-2 subset list, refreshing it if the file is missing."""
-    if AVAILABLE_LANGUAGES_FILE.exists():
-        with AVAILABLE_LANGUAGES_FILE.open("r", encoding="utf-8") as f:
-            subsets = [line.strip() for line in f if line.strip()]
-        if subsets:
-            return sorted(set(subsets) | {"eng_Latn"})
-    return refresh_available_subsets()
+    return sorted(set(subsets))
 
 
 def resolve_language_dataset(lang):
@@ -139,89 +121,15 @@ def parse_args():
         help="Output record format: jsonl (default) or tsv",
     )
     parser.add_argument("--min-char-len", type=int, default=200, help="Minimum document length in characters")
-    parser.add_argument(
-        "--shuffle", action="store_true", help="Shuffle the output corpus after mixing"
-    )
-    parser.add_argument(
-        "--shuffle-batch-size",
-        type=int,
-        default=10_000,
-        help="Rows to keep in memory per shuffle batch; smaller values use less RAM",
-    )
-    parser.add_argument(
-        "--random-seed", default=42, type=int, help="Random seed for shuffling (if --shuffle is used)"
-    )
-
     args = parser.parse_args()
     if args.target_bytes <= 0:
         parser.error("--target-bytes must be a positive integer")
-    if args.shuffle_batch_size <= 0:
-        parser.error("--shuffle-batch-size must be a positive integer")
     return args
-
-
-def shuffle_output_streaming(output_path, random_seed, batch_size):
-    """Shuffle a large output file without holding the entire file in memory.
-
-    The algorithm batches rows into fixed-size chunks, shuffles each chunk in memory,
-    writes the chunk to a temporary file, and then concatenates the temporary files in
-    a random order. This keeps memory bounded while still yielding a non-trivial shuffle.
-    """
-    output_path = Path(output_path)
-    if not output_path.exists():
-        return
-
-    tmp_dir = Path(tempfile.mkdtemp(prefix="multilingual_shuffle_"))
-    chunk_paths = []
-    batch = []
-    try:
-        with output_path.open("r", encoding="utf-8") as src:
-            for line in src:
-                if not line.strip():
-                    continue
-                batch.append(line)
-                if len(batch) >= batch_size:
-                    chunk_path = tmp_dir / f"chunk_{len(chunk_paths):06d}.txt"
-                    rng = random.Random(random_seed + len(chunk_paths))
-                    rng.shuffle(batch)
-                    with chunk_path.open("w", encoding="utf-8") as chunk_file:
-                        chunk_file.writelines(batch)
-                    chunk_paths.append(str(chunk_path))
-                    batch = []
-
-        if batch:
-            chunk_path = tmp_dir / f"chunk_{len(chunk_paths):06d}.txt"
-            rng = random.Random(random_seed + len(chunk_paths))
-            rng.shuffle(batch)
-            with chunk_path.open("w", encoding="utf-8") as chunk_file:
-                chunk_file.writelines(batch)
-            chunk_paths.append(str(chunk_path))
-
-        if not chunk_paths:
-            return
-
-        rng = random.Random(random_seed)
-        rng.shuffle(chunk_paths)
-
-        with output_path.open("w", encoding="utf-8") as dst:
-            for chunk_path in chunk_paths:
-                with Path(chunk_path).open("r", encoding="utf-8") as chunk_file:
-                    shutil.copyfileobj(chunk_file, dst)
-    finally:
-        for chunk_path in chunk_paths:
-            try:
-                Path(chunk_path).unlink()
-            except FileNotFoundError:
-                pass
-        try:
-            tmp_dir.rmdir()
-        except OSError:
-            pass
 
 
 def main(args):
     if args.list_languages:
-        available_subsets = refresh_available_subsets()
+        available_subsets = get_available_subsets()
         list_languages(available_subsets)
         return 0
 
@@ -231,7 +139,7 @@ def main(args):
         logger.info("No languages were provided. Using the default mix: %s", ", ".join(DEFAULT_LANGS))
         selected_langs = list(DEFAULT_LANGS)
 
-    available_subsets = fetch_available_subsets()
+    available_subsets = get_available_subsets()
     invalid_langs = [l for l in selected_langs if l not in available_subsets]
     if invalid_langs:
         logger.error("Subset(s) %s do not exist in FineWeb-2. Run with --list-languages to see valid codes.", ", ".join(invalid_langs))
@@ -305,9 +213,6 @@ def main(args):
                 except StopIteration:
                     logger.warning("\nData for subset %s were exhausted before reaching the target quota.", lang)
                     active_langs.remove(lang)
-
-    if args.shuffle and Path(args.output).exists():
-        shuffle_output_streaming(args.output, args.random_seed, args.shuffle_batch_size)
 
     logger.info("\n=== Done ===")
     logger.info("Saved to: %s", str(Path(args.output).resolve()))
