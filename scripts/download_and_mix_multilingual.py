@@ -190,9 +190,19 @@ def main(args):
                         continue
 
                     doc_bytes = len(text.encode("utf-8"))
-                    if total_written_bytes + doc_bytes > args.target_bytes:
+                    remaining_capacity = args.target_bytes - total_written_bytes
+                    if remaining_capacity <= 0:
                         logger.info("\nReached byte cap: stopping at %s bytes (target: %s).",
                                     f"{total_written_bytes:,}", f"{args.target_bytes:,}")
+                        reached_byte_cap = True
+                        break
+                    if doc_bytes > remaining_capacity:
+                        logger.info(
+                            "\nDocument for %s is larger than the remaining budget (%s bytes > %s bytes remaining); stopping early.",
+                            lang,
+                            doc_bytes,
+                            remaining_capacity,
+                        )
                         reached_byte_cap = True
                         break
 
