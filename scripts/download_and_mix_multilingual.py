@@ -2,7 +2,9 @@
 import argparse
 import json
 import logging
+import random
 import sys
+import tempfile
 from pathlib import Path
 from datasets import get_dataset_config_names, load_dataset
 
@@ -127,6 +129,90 @@ def parse_args():
     return args
 
 
+TEMP_SHARD_SIZE_BYTES = 64 * 1024 * 1024
+
+
+def format_output_record(lang, text, doc_bytes, output_format):
+    if output_format == "jsonl":
+        output_obj = {
+            "text": text,
+            "dataset_subset": lang,
+            "byte_length": doc_bytes,
+        }
+        return json.dumps(output_obj, ensure_ascii=False) + "\n"
+
+    safe_text = text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    return f"{doc_bytes}\t{lang}\t{safe_text}\n"
+
+
+def write_language_shards(lang, target_bytes, temp_dir, min_char_len, output_format):
+    dataset_name, dataset_config = resolve_language_dataset(lang)
+    load_kwargs = {"split": "train", "streaming": True}
+    if dataset_config is not None:
+        load_kwargs["name"] = dataset_config
+
+    shard_paths = []
+    current_shard_path = None
+    current_handle = None
+    current_bytes = 0
+    total_written_bytes = 0
+
+    logger.info("Opening network stream for: %s...", lang)
+    try:
+        ds = load_dataset(dataset_name, **load_kwargs)
+    except Exception as e:
+        logger.error("Error while connecting to subset %s: %s", lang, e)
+        raise
+
+    for doc in ds:
+        if total_written_bytes >= target_bytes:
+            break
+
+        text = doc.get("text", "")
+        if len(text) < min_char_len:
+            continue
+
+        doc_bytes = len(text.encode("utf-8"))
+        if doc_bytes <= 0:
+            continue
+
+        remaining_budget = target_bytes - total_written_bytes
+        if doc_bytes > remaining_budget:
+            logger.debug(
+                "Skipping oversized document for %s (%s bytes > %s bytes remaining in quota).",
+                lang,
+                doc_bytes,
+                remaining_budget,
+            )
+            continue
+
+        if current_handle is None or current_bytes + doc_bytes > TEMP_SHARD_SIZE_BYTES:
+            if current_handle is not None:
+                current_handle.close()
+            current_shard_path = temp_dir / f"{lang}_{len(shard_paths):04d}.tmp"
+            current_handle = current_shard_path.open("w", encoding="utf-8")
+            current_bytes = 0
+            shard_paths.append(current_shard_path)
+
+        current_handle.write(format_output_record(lang, text, doc_bytes, output_format))
+        current_bytes += doc_bytes
+        total_written_bytes += doc_bytes
+
+    if current_handle is not None:
+        current_handle.close()
+
+    logger.info("  - %s: %s bytes written to %d shard(s)", lang, f"{total_written_bytes:,}", len(shard_paths))
+    return shard_paths, total_written_bytes
+
+
+def merge_shards(shard_paths, output_path):
+    with open(output_path, "w", encoding="utf-8") as out_f:
+        for shard_path in shard_paths:
+            with open(shard_path, "r", encoding="utf-8") as shard_f:
+                for line in shard_f:
+                    out_f.write(line)
+
+
 def main(args):
     if args.list_languages:
         available_subsets = get_available_subsets()
@@ -154,79 +240,37 @@ def main(args):
 
     target_bytes_per_lang = {lang: int(args.target_bytes * mixing_ratios[lang]) for lang in selected_langs}
 
-    iterators = {}
-    for lang in selected_langs:
-        logger.info("Opening network stream for: %s...", lang)
-        try:
-            dataset_name, dataset_config = resolve_language_dataset(lang)
-            load_kwargs = {"split": "train", "streaming": True}
-            if dataset_config is not None:
-                load_kwargs["name"] = dataset_config
-            ds = load_dataset(dataset_name, **load_kwargs)
-            iterators[lang] = iter(ds)
-        except Exception as e:
-            logger.error("Error while connecting to subset %s: %s", lang, e)
-            return 1
+    with tempfile.TemporaryDirectory(prefix="fineweb_mix_") as temp_root:
+        temp_dir = Path(temp_root)
+        shard_paths = []
+        collected_bytes = {lang: 0 for lang in selected_langs}
 
-    collected_bytes = {lang: 0 for lang in selected_langs}
-    total_written_bytes = 0
-    active_langs = list(selected_langs)
-    reached_byte_cap = False
+        logger.info("\nStarting sharded download and writing to %s...", str(Path(args.output).resolve()))
+        for lang in selected_langs:
+            try:
+                lang_shards, written_bytes = write_language_shards(
+                    lang=lang,
+                    target_bytes=target_bytes_per_lang[lang],
+                    temp_dir=temp_dir,
+                    min_char_len=args.min_char_len,
+                    output_format=args.output_format,
+                )
+            except Exception as e:
+                logger.error("Error while connecting to subset %s: %s", lang, e)
+                return 1
 
-    logger.info("\nStarting sample download and writing to %s...", args.output)
+            shard_paths.extend(lang_shards)
+            collected_bytes[lang] = written_bytes
 
-    with open(args.output, "w", encoding="utf-8") as f_out:
-        while active_langs and not reached_byte_cap:
-            for lang in list(active_langs):
-                if collected_bytes[lang] >= target_bytes_per_lang[lang]:
-                    active_langs.remove(lang)
-                    continue
+        if not shard_paths:
+            logger.warning("No records were written for the selected languages; output file will be empty.")
 
-                try:
-                    doc = next(iterators[lang])
-                    text = doc.get("text", "")
-
-                    if len(text) < args.min_char_len:
-                        continue
-
-                    doc_bytes = len(text.encode("utf-8"))
-                    remaining_capacity = args.target_bytes - total_written_bytes
-                    if remaining_capacity <= 0:
-                        logger.info("\nReached byte cap: stopping at %s bytes (target: %s).",
-                                    f"{total_written_bytes:,}", f"{args.target_bytes:,}")
-                        reached_byte_cap = True
-                        break
-                    if doc_bytes > remaining_capacity:
-                        logger.info(
-                            "\nDocument for %s is larger than the remaining budget (%s bytes > %s bytes remaining); stopping early.",
-                            lang,
-                            doc_bytes,
-                            remaining_capacity,
-                        )
-                        reached_byte_cap = True
-                        break
-
-                    if args.output_format == "jsonl":
-                        output_obj = {
-                            "text": text,
-                            "dataset_subset": lang,
-                            "byte_length": doc_bytes
-                        }
-                        f_out.write(json.dumps(output_obj, ensure_ascii=False) + "\n")
-                    else:
-                        safe_text = text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
-                        f_out.write(f"{doc_bytes}\t{lang}\t{safe_text}\n")
-
-                    collected_bytes[lang] += doc_bytes
-                    total_written_bytes += doc_bytes
-
-                except StopIteration:
-                    logger.warning("\nData for subset %s were exhausted before reaching the target quota.", lang)
-                    active_langs.remove(lang)
+        random.shuffle(shard_paths)
+        merge_shards(shard_paths, args.output)
 
     logger.info("\n=== Done ===")
     logger.info("Saved to: %s", str(Path(args.output).resolve()))
-    logger.info("Total UTF-8 bytes collected: %s / %s", f"{total_written_bytes:,}", f"{args.target_bytes:,}")
+    logger.info("Total UTF-8 bytes collected: %s / %s", f"{sum(collected_bytes.values()):,}", f"{args.target_bytes:,}")
     for lang in selected_langs:
         logger.info("  - %s: %s bytes (target: %s)", lang, f"{collected_bytes[lang]:,}", f"{target_bytes_per_lang[lang]:,}")
 
