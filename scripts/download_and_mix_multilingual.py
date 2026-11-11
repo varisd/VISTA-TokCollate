@@ -4,7 +4,9 @@ import json
 import logging
 import os
 import random
+import shutil
 import sys
+import tempfile
 from datasets import get_dataset_config_names, load_dataset
 
 logger = logging.getLogger(__name__)
@@ -107,7 +109,13 @@ def parse_args():
     )
     parser.add_argument("--min-char-len", type=int, default=200, help="Minimum document length in characters")
     parser.add_argument(
-        "--shuffle", action="store_true", help="Shuffle the output corpus after mixing (may require more memory)"
+        "--shuffle", action="store_true", help="Shuffle the output corpus after mixing"
+    )
+    parser.add_argument(
+        "--shuffle-batch-size",
+        type=int,
+        default=10_000,
+        help="Rows to keep in memory per shuffle batch; smaller values use less RAM",
     )
     parser.add_argument(
         "--random-seed", default=42, type=int, help="Random seed for shuffling (if --shuffle is used)"
@@ -116,7 +124,67 @@ def parse_args():
     args = parser.parse_args()
     if args.target_bytes <= 0:
         parser.error("--target-bytes must be a positive integer")
+    if args.shuffle_batch_size <= 0:
+        parser.error("--shuffle-batch-size must be a positive integer")
     return args
+
+
+def shuffle_output_streaming(output_path, random_seed, batch_size):
+    """Shuffle a large output file without holding the entire file in memory.
+
+    The algorithm batches rows into fixed-size chunks, shuffles each chunk in memory,
+    writes the chunk to a temporary file, and then concatenates the temporary files in
+    a random order. This keeps memory bounded while still yielding a non-trivial shuffle.
+    """
+    if not os.path.exists(output_path):
+        return
+
+    tmp_dir = tempfile.mkdtemp(prefix="multilingual_shuffle_")
+    chunk_paths = []
+    batch = []
+    try:
+        with open(output_path, "r", encoding="utf-8") as src:
+            for line in src:
+                if not line.strip():
+                    continue
+                batch.append(line)
+                if len(batch) >= batch_size:
+                    chunk_path = os.path.join(tmp_dir, f"chunk_{len(chunk_paths):06d}.txt")
+                    rng = random.Random(random_seed + len(chunk_paths))
+                    rng.shuffle(batch)
+                    with open(chunk_path, "w", encoding="utf-8") as chunk_file:
+                        chunk_file.writelines(batch)
+                    chunk_paths.append(chunk_path)
+                    batch = []
+
+        if batch:
+            chunk_path = os.path.join(tmp_dir, f"chunk_{len(chunk_paths):06d}.txt")
+            rng = random.Random(random_seed + len(chunk_paths))
+            rng.shuffle(batch)
+            with open(chunk_path, "w", encoding="utf-8") as chunk_file:
+                chunk_file.writelines(batch)
+            chunk_paths.append(chunk_path)
+
+        if not chunk_paths:
+            return
+
+        rng = random.Random(random_seed)
+        rng.shuffle(chunk_paths)
+
+        with open(output_path, "w", encoding="utf-8") as dst:
+            for chunk_path in chunk_paths:
+                with open(chunk_path, "r", encoding="utf-8") as chunk_file:
+                    shutil.copyfileobj(chunk_file, dst)
+    finally:
+        for chunk_path in chunk_paths:
+            try:
+                os.remove(chunk_path)
+            except FileNotFoundError:
+                pass
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
 
 
 def main(args):
@@ -204,13 +272,7 @@ def main(args):
                     active_langs.remove(lang)
 
     if args.shuffle and os.path.exists(args.output):
-        random.seed(args.random_seed)
-        with open(args.output, "r", encoding="utf-8") as f_in:
-            rows = [line.rstrip("\n") for line in f_in if line.strip()]
-        random.shuffle(rows)
-        with open(args.output, "w", encoding="utf-8") as f_out:
-            for row in rows:
-                f_out.write(row + "\n")
+        shuffle_output_streaming(args.output, args.random_seed, args.shuffle_batch_size)
 
     logger.info("\n=== Done ===")
     logger.info("Saved to: %s", os.path.abspath(args.output))
