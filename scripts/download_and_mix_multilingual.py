@@ -2,11 +2,11 @@
 import argparse
 import json
 import logging
-import os
 import random
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 from datasets import get_dataset_config_names, load_dataset
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,7 @@ logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 # Default Fineweb-2 language subset
 DEFAULT_LANGS = ["eng_Latn", "spa_Latn", "deu_Latn", "rus_Cyrl", "cmn_Hani"]
+AVAILABLE_LANGUAGES_FILE = Path(__file__).with_name("fineweb2.languages.txt")
 
 # Use uniform mixing ratios as a default
 DEFAULT_RATIOS = {
@@ -28,8 +29,8 @@ DEFAULT_RATIOS = {
 }
 
 
-def fetch_available_subsets():
-    """Fetch all available FineWeb-2 subsets and add the English FineWeb fallback used for eng_Latn."""
+def refresh_available_subsets():
+    """Fetch the complete FineWeb-2 language list and persist it to the cache file."""
     try:
         subsets = sorted(get_dataset_config_names("HuggingFaceFW/fineweb-2"))
         subsets = [
@@ -40,10 +41,23 @@ def fetch_available_subsets():
         logger.warning("Failed to load FineWeb-2 metadata from Hugging Face: %s", e)
         subsets = []
 
-    # English is not exposed as eng_Latn in FineWeb-2, but the original FineWeb corpus is the right fallback.
     if "eng_Latn" not in subsets:
         subsets.append("eng_Latn")
-    return sorted(subsets)
+    ordered = sorted(set(subsets))
+    with AVAILABLE_LANGUAGES_FILE.open("w", encoding="utf-8") as f:
+        for subset in ordered:
+            f.write(f"{subset}\n")
+    return ordered
+
+
+def fetch_available_subsets():
+    """Return the cached FineWeb-2 subset list, refreshing it if the file is missing."""
+    if AVAILABLE_LANGUAGES_FILE.exists():
+        with AVAILABLE_LANGUAGES_FILE.open("r", encoding="utf-8") as f:
+            subsets = [line.strip() for line in f if line.strip()]
+        if subsets:
+            return sorted(set(subsets) | {"eng_Latn"})
+    return refresh_available_subsets()
 
 
 def resolve_language_dataset(lang):
@@ -153,34 +167,35 @@ def shuffle_output_streaming(output_path, random_seed, batch_size):
     writes the chunk to a temporary file, and then concatenates the temporary files in
     a random order. This keeps memory bounded while still yielding a non-trivial shuffle.
     """
-    if not os.path.exists(output_path):
+    output_path = Path(output_path)
+    if not output_path.exists():
         return
 
-    tmp_dir = tempfile.mkdtemp(prefix="multilingual_shuffle_")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="multilingual_shuffle_"))
     chunk_paths = []
     batch = []
     try:
-        with open(output_path, "r", encoding="utf-8") as src:
+        with output_path.open("r", encoding="utf-8") as src:
             for line in src:
                 if not line.strip():
                     continue
                 batch.append(line)
                 if len(batch) >= batch_size:
-                    chunk_path = os.path.join(tmp_dir, f"chunk_{len(chunk_paths):06d}.txt")
+                    chunk_path = tmp_dir / f"chunk_{len(chunk_paths):06d}.txt"
                     rng = random.Random(random_seed + len(chunk_paths))
                     rng.shuffle(batch)
-                    with open(chunk_path, "w", encoding="utf-8") as chunk_file:
+                    with chunk_path.open("w", encoding="utf-8") as chunk_file:
                         chunk_file.writelines(batch)
-                    chunk_paths.append(chunk_path)
+                    chunk_paths.append(str(chunk_path))
                     batch = []
 
         if batch:
-            chunk_path = os.path.join(tmp_dir, f"chunk_{len(chunk_paths):06d}.txt")
+            chunk_path = tmp_dir / f"chunk_{len(chunk_paths):06d}.txt"
             rng = random.Random(random_seed + len(chunk_paths))
             rng.shuffle(batch)
-            with open(chunk_path, "w", encoding="utf-8") as chunk_file:
+            with chunk_path.open("w", encoding="utf-8") as chunk_file:
                 chunk_file.writelines(batch)
-            chunk_paths.append(chunk_path)
+            chunk_paths.append(str(chunk_path))
 
         if not chunk_paths:
             return
@@ -188,26 +203,25 @@ def shuffle_output_streaming(output_path, random_seed, batch_size):
         rng = random.Random(random_seed)
         rng.shuffle(chunk_paths)
 
-        with open(output_path, "w", encoding="utf-8") as dst:
+        with output_path.open("w", encoding="utf-8") as dst:
             for chunk_path in chunk_paths:
-                with open(chunk_path, "r", encoding="utf-8") as chunk_file:
+                with Path(chunk_path).open("r", encoding="utf-8") as chunk_file:
                     shutil.copyfileobj(chunk_file, dst)
     finally:
         for chunk_path in chunk_paths:
             try:
-                os.remove(chunk_path)
+                Path(chunk_path).unlink()
             except FileNotFoundError:
                 pass
         try:
-            os.rmdir(tmp_dir)
+            tmp_dir.rmdir()
         except OSError:
             pass
 
 
 def main(args):
-    available_subsets = fetch_available_subsets()
-
     if args.list_languages:
+        available_subsets = refresh_available_subsets()
         list_languages(available_subsets)
         return 0
 
@@ -215,8 +229,9 @@ def main(args):
         selected_langs = [l.strip() for l in args.languages.split(",") if l.strip()]
     else:
         logger.info("No languages were provided. Using the default mix: %s", ", ".join(DEFAULT_LANGS))
-        selected_langs = [l for l in DEFAULT_LANGS if l in available_subsets]
+        selected_langs = list(DEFAULT_LANGS)
 
+    available_subsets = fetch_available_subsets()
     invalid_langs = [l for l in selected_langs if l not in available_subsets]
     if invalid_langs:
         logger.error("Subset(s) %s do not exist in FineWeb-2. Run with --list-languages to see valid codes.", ", ".join(invalid_langs))
@@ -291,11 +306,11 @@ def main(args):
                     logger.warning("\nData for subset %s were exhausted before reaching the target quota.", lang)
                     active_langs.remove(lang)
 
-    if args.shuffle and os.path.exists(args.output):
+    if args.shuffle and Path(args.output).exists():
         shuffle_output_streaming(args.output, args.random_seed, args.shuffle_batch_size)
 
     logger.info("\n=== Done ===")
-    logger.info("Saved to: %s", os.path.abspath(args.output))
+    logger.info("Saved to: %s", str(Path(args.output).resolve()))
     logger.info("Total UTF-8 bytes collected: %s / %s", f"{total_written_bytes:,}", f"{args.target_bytes:,}")
     for lang in selected_langs:
         logger.info("  - %s: %s bytes (target: %s)", lang, f"{collected_bytes[lang]:,}", f"{target_bytes_per_lang[lang]:,}")
