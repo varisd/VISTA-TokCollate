@@ -29,23 +29,40 @@ DEFAULT_RATIOS = {
 
 
 def fetch_available_subsets():
-    """Fetch all available language subsets directly from the FineWeb-2 dataset configs."""
+    """Fetch all available FineWeb-2 subsets and add the English FineWeb fallback used for eng_Latn."""
     try:
         subsets = sorted(get_dataset_config_names("HuggingFaceFW/fineweb-2"))
         subsets = [
             subset for subset in subsets
             if subset and not subset.endswith("_removed") and not subset.startswith("und_")
         ]
-        return subsets
     except Exception as e:
         logger.warning("Failed to load FineWeb-2 metadata from Hugging Face: %s", e)
-        return DEFAULT_LANGS
+        subsets = []
+
+    # English is not exposed as eng_Latn in FineWeb-2, but the original FineWeb corpus is the right fallback.
+    if "eng_Latn" not in subsets:
+        subsets.append("eng_Latn")
+    return sorted(subsets)
+
+
+def resolve_language_dataset(lang):
+    """Return the dataset name and optional config for a language.
+
+    FineWeb-2 exposes language-specific configs; English is missing there and is instead
+    sourced from the original FineWeb corpus.
+    """
+    if lang == "eng_Latn":
+        return "HuggingFaceFW/fineweb", None
+    return "HuggingFaceFW/fineweb-2", lang
 
 
 def list_languages(available_subsets):
     logger.info("\n=== Available FineWeb-2 subsets ===")
     for subset in available_subsets:
         marker = " [DEFAULT IN MIX]" if subset in DEFAULT_LANGS else ""
+        if subset == "eng_Latn":
+            marker += " [FALLBACK: original FineWeb]"
         logger.info("  - %s%s", subset, marker)
     logger.info("\nTotal found: %d script/language configs.", len(available_subsets))
     logger.info("==============================================\n")
@@ -218,8 +235,11 @@ def main(args):
     for lang in selected_langs:
         logger.info("Opening network stream for: %s...", lang)
         try:
-            # stream=True ensures documents are pulled incrementally instead of downloading whole corpora to disk.
-            ds = load_dataset("HuggingFaceFW/fineweb-2", name=lang, split="train", streaming=True)
+            dataset_name, dataset_config = resolve_language_dataset(lang)
+            load_kwargs = {"split": "train", "streaming": True}
+            if dataset_config is not None:
+                load_kwargs["name"] = dataset_config
+            ds = load_dataset(dataset_name, **load_kwargs)
             iterators[lang] = iter(ds)
         except Exception as e:
             logger.error("Error while connecting to subset %s: %s", lang, e)
