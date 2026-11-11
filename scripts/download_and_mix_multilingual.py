@@ -3,6 +3,7 @@ import argparse
 import json
 import logging
 import os
+import random
 import sys
 from datasets import get_dataset_config_names, load_dataset
 
@@ -78,38 +79,64 @@ def parse_mixing_ratios(ratio_str, selected_langs):
         return {l: 1.0 / len(selected_langs) for l in selected_langs}
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(description="Stream and mix FineWeb-2 corpora by byte budget, not token count")
-    parser.add_argument("--list", action="store_true", help="List all available language subsets on Hugging Face and exit")
-    parser.add_argument("--langs", type=str, help="Comma-separated FineWeb-2 subset names (e.g. eng_Latn,deu_Latn,ces_Latn)")
-    parser.add_argument("--target_bytes", type=int, default=256_000_000, help="Target total byte budget for the final mixed corpus (may finish slightly under the cap)")
+    parser.add_argument(
+        "--list-languages", action="store_true", help="List all available language subsets on Hugging Face and exit"
+    )
+    parser.add_argument(
+        "--languages", type=str, help="Comma-separated FineWeb-2 subset names (e.g. eng_Latn,deu_Latn,ces_Latn)"
+    )
+    parser.add_argument(
+        "--target-bytes", type=int, default=1_000_000, help="Target total byte budget for the final mixed corpus (may finish slightly under the cap)"
+    )
     parser.add_argument("--ratios", type=str, help="Custom mixing ratios, e.g. deu_Latn:0.5,rus_Cyrl:0.5")
-    parser.add_argument("--output", type=str, default="multilingual_corpus.jsonl", help="Output file name (.jsonl)")
-    parser.add_argument("--min_char_len", type=int, default=200, help="Minimum document length in characters")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="multilingual_corpus.jsonl",
+        help="Output file name (.jsonl or .tsv; default is JSONL)",
+    )
+    parser.add_argument(
+        "--output-format",
+        "--format",
+        dest="output_format",
+        choices=("jsonl", "tsv"),
+        default="jsonl",
+        help="Output record format: jsonl (default) or tsv",
+    )
+    parser.add_argument("--min-char-len", type=int, default=200, help="Minimum document length in characters")
+    parser.add_argument(
+        "--shuffle", action="store_true", help="Shuffle the output corpus after mixing (may require more memory)"
+    )
+    parser.add_argument(
+        "--random-seed", default=42, type=int, help="Random seed for shuffling (if --shuffle is used)"
+    )
 
     args = parser.parse_args()
     if args.target_bytes <= 0:
-        parser.error("--target_bytes must be a positive integer")
+        parser.error("--target-bytes must be a positive integer")
+    return args
 
-    # Load the real list from Hugging Face.
+
+def main(args):
     available_subsets = fetch_available_subsets()
 
-    if args.list:
+    if args.list_languages:
         list_languages(available_subsets)
-        sys.exit(0)
+        return 0
 
-    # 1. Validate and select languages.
-    if args.langs:
-        selected_langs = [l.strip() for l in args.langs.split(",")]
-        for l in selected_langs:
-            if l not in available_subsets:
-                logger.error("Subset '%s' does not exist in FineWeb-2. Run with --list to see valid codes.", l)
-                sys.exit(1)
+    if args.languages:
+        selected_langs = [l.strip() for l in args.languages.split(",") if l.strip()]
     else:
         logger.info("No languages were provided. Using the default mix: %s", ", ".join(DEFAULT_LANGS))
         selected_langs = [l for l in DEFAULT_LANGS if l in available_subsets]
 
-    # 2. Set the weights.
+    invalid_langs = [l for l in selected_langs if l not in available_subsets]
+    if invalid_langs:
+        logger.error("Subset(s) %s do not exist in FineWeb-2. Run with --list-languages to see valid codes.", ", ".join(invalid_langs))
+        return 1
+
     mixing_ratios = parse_mixing_ratios(args.ratios, selected_langs)
 
     logger.info("\nPlanned composition of the output corpus:")
@@ -119,7 +146,6 @@ def main():
 
     target_bytes_per_lang = {lang: int(args.target_bytes * mixing_ratios[lang]) for lang in selected_langs}
 
-    # 3. Initialize the streaming dataset iterators from Hugging Face.
     iterators = {}
     for lang in selected_langs:
         logger.info("Opening network stream for: %s...", lang)
@@ -129,9 +155,8 @@ def main():
             iterators[lang] = iter(ds)
         except Exception as e:
             logger.error("Error while connecting to subset %s: %s", lang, e)
-            sys.exit(1)
+            return 1
 
-    # 4. Proportional mixing and JSONL output by UTF-8 byte length.
     collected_bytes = {lang: 0 for lang in selected_langs}
     total_written_bytes = 0
     active_langs = list(selected_langs)
@@ -160,12 +185,16 @@ def main():
                         reached_byte_cap = True
                         break
 
-                    output_obj = {
-                        "text": text,
-                        "dataset_subset": lang,
-                        "byte_length": doc_bytes
-                    }
-                    f_out.write(json.dumps(output_obj, ensure_ascii=False) + "\n")
+                    if args.output_format == "jsonl":
+                        output_obj = {
+                            "text": text,
+                            "dataset_subset": lang,
+                            "byte_length": doc_bytes
+                        }
+                        f_out.write(json.dumps(output_obj, ensure_ascii=False) + "\n")
+                    else:
+                        safe_text = text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+                        f_out.write(f"{doc_bytes}\t{lang}\t{safe_text}\n")
 
                     collected_bytes[lang] += doc_bytes
                     total_written_bytes += doc_bytes
@@ -173,6 +202,15 @@ def main():
                 except StopIteration:
                     logger.warning("\nData for subset %s were exhausted before reaching the target quota.", lang)
                     active_langs.remove(lang)
+
+    if args.shuffle and os.path.exists(args.output):
+        random.seed(args.random_seed)
+        with open(args.output, "r", encoding="utf-8") as f_in:
+            rows = [line.rstrip("\n") for line in f_in if line.strip()]
+        random.shuffle(rows)
+        with open(args.output, "w", encoding="utf-8") as f_out:
+            for row in rows:
+                f_out.write(row + "\n")
 
     logger.info("\n=== Done ===")
     logger.info("Saved to: %s", os.path.abspath(args.output))
@@ -182,8 +220,4 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except BrokenPipeError:
-        # `head` closes the pipe early. Exit quietly rather than crashing.
-        pass
+    sys.exit(main(parse_args()))
