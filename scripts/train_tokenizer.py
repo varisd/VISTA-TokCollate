@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train a tokenizer on a corpus and save it to data/tokenizers by default.
+"""Train a tokenizer on a corpus and save it under an output prefix.
 
 Supported tokenizer families:
 - bpe: standard byte-level BPE
@@ -8,7 +8,7 @@ Supported tokenizer families:
 - parity_aware_bpe: byte-level BPE with parity-aware vocabulary balancing
 
 Default save location:
-  data/tokenizers/<tokenizer_type>_<vocab_size>
+    data/tokenizers/tokenizer.<tokenizer_type>.<vocab_size>
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from tokenizers.pre_tokenizers import ByteLevel, Metaspace, Whitespace
 from tokenizers.trainers import BpeTrainer, UnigramTrainer, WordPieceTrainer
 
 
-DEFAULT_OUTPUT_DIR = Path("data/tokenizers")
+DEFAULT_OUTPUT_PREFIX = Path("data/tokenizers/tokenizer")
 DEFAULT_SPECIAL_TOKENS = ["<unk>", "<pad>", "<bos>", "<eos>", "<mask>"]
 
 
@@ -122,7 +122,7 @@ def train_parity_aware(tokenizer: Tokenizer, corpus_path: Path, vocab_size: int,
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a tokenization model on a corpus and save it under data/tokenizers.")
+    parser = argparse.ArgumentParser(description="Train a tokenization model on a corpus and save it under an output prefix.")
     parser.add_argument("--corpus", type=Path, required=True, help="Plain-text corpus to train on. One document per line.")
     parser.add_argument(
         "--tokenizer-type",
@@ -131,9 +131,13 @@ def parse_args() -> argparse.Namespace:
         help="Tokenizer family to train.",
     )
     parser.add_argument("--vocab-size", type=int, default=32768, help="Target vocabulary size.")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory to save the trained tokenizer under. Default: data/tokenizers")
+    parser.add_argument(
+        "--output-prefix",
+        type=Path,
+        default=DEFAULT_OUTPUT_PREFIX,
+        help="Output directory prefix. Final directory name is <output-prefix>.<tokenizer-type>.<vocabulary-size>",
+    )
     parser.add_argument("--min-frequency", type=int, default=2, help="Minimum token frequency for training.")
-    parser.add_argument("--name", type=str, default=None, help="Optional output subdirectory name. Defaults to tokenizer_type_vocab_size.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for stochastic training routines.")
     parser.add_argument("--special-tokens", nargs="*", default=DEFAULT_SPECIAL_TOKENS, help="Special tokens to reserve in the tokenizer vocabulary.")
     return parser.parse_args()
@@ -148,8 +152,7 @@ def main() -> int:
     if args.vocab_size <= 0:
         raise ValueError("--vocab-size must be positive.")
 
-    output_name = args.name or f"{args.tokenizer_type}_{args.vocab_size}"
-    output_dir = (args.output_dir / output_name).resolve()
+    output_dir = Path(f"{args.output_prefix}.{args.tokenizer_type}.{args.vocab_size}").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     special_tokens = list(dict.fromkeys(args.special_tokens))
