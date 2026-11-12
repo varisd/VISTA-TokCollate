@@ -5,7 +5,7 @@ Supported tokenizer families:
 - bpe: standard byte-level BPE
 - unigram: unigram LM tokenizer
 - wordpiece: WordPiece tokenizer
-- parity_aware: byte-level BPE with parity-aware vocabulary balancing
+- parity_aware_bpe: byte-level BPE with parity-aware vocabulary balancing
 
 Default save location:
   data/tokenizers/<tokenizer_type>_<vocab_size>
@@ -124,7 +124,12 @@ def train_parity_aware(tokenizer: Tokenizer, corpus_path: Path, vocab_size: int,
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a tokenization model on a corpus and save it under data/tokenizers.")
     parser.add_argument("--corpus", type=Path, required=True, help="Plain-text corpus to train on. One document per line.")
-    parser.add_argument("--tokenizer-type", choices=["bpe", "unigram", "wordpiece", "parity_aware"], default="bpe", help="Tokenizer family to train.")
+    parser.add_argument(
+        "--tokenizer-type",
+        choices=["bpe", "unigram", "wordpiece", "parity_aware_bpe"],
+        default="bpe",
+        help="Tokenizer family to train.",
+    )
     parser.add_argument("--vocab-size", type=int, default=32768, help="Target vocabulary size.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory to save the trained tokenizer under. Default: data/tokenizers")
     parser.add_argument("--min-frequency", type=int, default=2, help="Minimum token frequency for training.")
@@ -149,20 +154,26 @@ def main() -> int:
 
     special_tokens = list(dict.fromkeys(args.special_tokens))
 
-    if args.tokenizer_type == "bpe":
+    tokenizer_type = args.tokenizer_type
+    if tokenizer_type == "parity_aware":
+        tokenizer_type = "parity_aware_bpe"
+
+    if tokenizer_type == "bpe":
         tokenizer = build_bpe_tokenizer()
         train_bpe(tokenizer, corpus_path, args.vocab_size, args.min_frequency, special_tokens)
-    elif args.tokenizer_type == "unigram":
+    elif tokenizer_type == "unigram":
         tokenizer = build_unigram_tokenizer()
         train_unigram(tokenizer, corpus_path, args.vocab_size, special_tokens, args.seed)
-    elif args.tokenizer_type == "wordpiece":
+    elif tokenizer_type == "wordpiece":
         tokenizer = build_wordpiece_tokenizer()
         train_wordpiece(tokenizer, corpus_path, args.vocab_size, args.min_frequency, special_tokens)
-    elif args.tokenizer_type == "parity_aware":
+    elif tokenizer_type == "parity_aware_bpe":
         tokenizer = build_parity_aware_tokenizer()
         train_parity_aware(tokenizer, corpus_path, args.vocab_size, args.min_frequency, special_tokens)
     else:
         raise ValueError(f"Unsupported tokenizer type: {args.tokenizer_type}")
+
+    args.tokenizer_type = tokenizer_type
 
     tokenizer_path = output_dir / "tokenizer.json"
     tokenizer.save(str(tokenizer_path))
