@@ -33,6 +33,7 @@ DEFAULT_RATIOS = {
 TEMP_SHARD_SIZE_BYTES = 64 * 1024 * 1024
 COPY_BUFFER_BYTES = 16 * 1024 * 1024
 PARQUET_BATCH_SIZE = 1024
+MERGE_BATCH_SIZE = 10_000
 HF_RETRY_DELAYS = (2, 5, 10, 20, 40)
 
 
@@ -293,13 +294,40 @@ def write_language_shards(
     return shard_paths, total_written_bytes
 
 
-def merge_shards(shard_paths, output_path):
-    """Merge temporary shards using raw binary chunk copying (zero string decoding)."""
-    logger.info("Merging %d shuffled shards into %s...", len(shard_paths), output_path)
+def merge_shards(shard_paths, output_path, rng=None, batch_size=MERGE_BATCH_SIZE):
+    """Merge temporary shards in streaming batches so the corpus is shuffled without keeping all rows in memory."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if rng is None:
+        rng = random.Random()
+
+    ordered_shards = list(shard_paths)
+    if len(ordered_shards) > 1:
+        rng.shuffle(ordered_shards)
+
+    logger.info(
+        "Merging %d shards with batch shuffle (batch size: %d records) into %s...",
+        len(ordered_shards),
+        batch_size,
+        output_path,
+    )
+
+    batch = []
     with open(output_path, "wb") as out_f:
-        for shard_path in shard_paths:
+        for shard_path in ordered_shards:
             with open(shard_path, "rb") as shard_f:
-                shutil.copyfileobj(shard_f, out_f, length=COPY_BUFFER_BYTES)
+                for raw_line in shard_f:
+                    if not raw_line:
+                        continue
+                    batch.append(raw_line)
+                    if len(batch) >= batch_size:
+                        rng.shuffle(batch)
+                        out_f.write(b"".join(batch))
+                        batch.clear()
+
+        if batch:
+            rng.shuffle(batch)
+            out_f.write(b"".join(batch))
 
 
 def resolve_temp_base(cli_temp_dir, output_path: Path):
@@ -376,8 +404,7 @@ def main(args):
         if not shard_paths:
             logger.warning("No records were written; output file will be empty.")
 
-        random.shuffle(shard_paths)
-        merge_shards(shard_paths, output_path)
+        merge_shards(shard_paths, output_path, rng=random.Random(), batch_size=MERGE_BATCH_SIZE)
 
         if temp_dir is not None and temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
