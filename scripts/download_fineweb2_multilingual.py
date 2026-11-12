@@ -378,6 +378,10 @@ def main(args):
 
         random.shuffle(shard_paths)
         merge_shards(shard_paths, output_path)
+
+        if temp_dir is not None and temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            logger.info("Deleted temporary shard directory: %s", temp_dir)
     finally:
         if temp_dir is not None and temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
