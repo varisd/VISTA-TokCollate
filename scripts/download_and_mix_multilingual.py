@@ -3,6 +3,7 @@ import argparse
 import json
 import logging
 import random
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -189,7 +190,7 @@ def write_language_shards(lang, target_bytes, temp_dir, min_char_len, output_for
         if current_handle is None or current_bytes + doc_bytes > TEMP_SHARD_SIZE_BYTES:
             if current_handle is not None:
                 current_handle.close()
-            current_shard_path = temp_dir / f"{lang}_{len(shard_paths):04d}.tmp"
+            current_shard_path = temp_dir / f"{lang}_shard_{len(shard_paths):04d}.tmp"
             current_handle = current_shard_path.open("w", encoding="utf-8")
             current_bytes = 0
             shard_paths.append(current_shard_path)
@@ -200,6 +201,14 @@ def write_language_shards(lang, target_bytes, temp_dir, min_char_len, output_for
 
     if current_handle is not None:
         current_handle.close()
+
+    if total_written_bytes < target_bytes:
+        logger.warning(
+            "Dataset for %s ended before reaching the requested target (%s bytes written, %s bytes target). Stopping for this language.",
+            lang,
+            f"{total_written_bytes:,}",
+            f"{target_bytes:,}",
+        )
 
     logger.info("  - %s: %s bytes written to %d shard(s)", lang, f"{total_written_bytes:,}", len(shard_paths))
     return shard_paths, total_written_bytes
@@ -240,12 +249,21 @@ def main(args):
 
     target_bytes_per_lang = {lang: int(args.target_bytes * mixing_ratios[lang]) for lang in selected_langs}
 
-    with tempfile.TemporaryDirectory(prefix="fineweb_mix_") as temp_root:
-        temp_dir = Path(temp_root)
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    temp_dir = None
+    try:
+        try:
+            temp_dir = Path(tempfile.mkdtemp(prefix=f"{output_path.stem}_", dir=str(output_path.parent)))
+        except OSError:
+            temp_dir = Path(tempfile.mkdtemp(prefix=f"{output_path.stem}_"))
+
+        logger.info("Temporary shard directory: %s", temp_dir)
         shard_paths = []
         collected_bytes = {lang: 0 for lang in selected_langs}
 
-        logger.info("\nStarting sharded download and writing to %s...", str(Path(args.output).resolve()))
+        logger.info("\nStarting sharded download and writing to %s...", str(output_path.resolve()))
         for lang in selected_langs:
             try:
                 lang_shards, written_bytes = write_language_shards(
@@ -266,7 +284,10 @@ def main(args):
             logger.warning("No records were written for the selected languages; output file will be empty.")
 
         random.shuffle(shard_paths)
-        merge_shards(shard_paths, args.output)
+        merge_shards(shard_paths, str(output_path))
+    finally:
+        if temp_dir is not None and temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     logger.info("\n=== Done ===")
     logger.info("Saved to: %s", str(Path(args.output).resolve()))
