@@ -6,6 +6,7 @@ import random
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from datasets import get_dataset_config_names, load_dataset
 
@@ -131,6 +132,28 @@ def parse_args():
 
 
 TEMP_SHARD_SIZE_BYTES = 64 * 1024 * 1024
+HF_RETRY_DELAYS = (1, 2, 4, 8, 16)
+
+
+def load_dataset_with_retry(dataset_name, **load_kwargs):
+    last_error = None
+    for attempt, delay in enumerate(HF_RETRY_DELAYS + (None,), start=1):
+        try:
+            return load_dataset(dataset_name, **load_kwargs)
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Dataset load failed for %s (attempt %d/%d): %s",
+                dataset_name,
+                attempt,
+                len(HF_RETRY_DELAYS) + 1,
+                exc,
+            )
+            if delay is None:
+                break
+            logger.info("Retrying dataset load for %s in %ss...", dataset_name, delay)
+            time.sleep(delay)
+    raise last_error
 
 
 def format_output_record(lang, text, doc_bytes, output_format):
@@ -160,7 +183,7 @@ def write_language_shards(lang, target_bytes, temp_dir, min_char_len, output_for
 
     logger.info("Opening network stream for: %s...", lang)
     try:
-        ds = load_dataset(dataset_name, **load_kwargs)
+        ds = load_dataset_with_retry(dataset_name, **load_kwargs)
     except Exception as e:
         logger.error("Error while connecting to subset %s: %s", lang, e)
         raise
