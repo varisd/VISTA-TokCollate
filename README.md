@@ -114,12 +114,12 @@ The 350M runs use FineWeb and FineWeb-2:
 ```bash
 python scripts/download_fineweb.py                       # HuggingFaceFW/fineweb, sample-10BT
 python scripts/download_fineweb2_multilingual.py --list-languages
-python scripts/download_fineweb2_multilingual.py --languages eng_Latn,deu_Latn,rus_Cyrl,cmn_Hani --target-bytes 1000000000 --output data/fineweb2_multilingual.jsonl
+python scripts/download_fineweb2_multilingual.py --languages eng_Latn,deu_Latn,rus_Cyrl,cmn_Hani --target-bytes 1000000000 --output data/fineweb2_multilingual.tsv
 ```
 
 The new script replaces the old single-purpose FineWeb-2 shell downloader. It streams remote Parquet
-files directly from Hugging Face, lets you select a custom language mix and ratio, and writes either
-JSONL or TSV output with temp-shard buffering and retry handling. The older workflow was a simple
+files directly from Hugging Face, lets you select a custom language mix and ratio, and writes TSV
+output with temp-shard buffering and retry handling. The older workflow was a simple
 language-by-language download; this version is a mixed-corpus builder for multilingual training data.
 
 **3. Byte-premium splits** (130M path only). Carves each corpus into a `byte_premium × 1 GiB` train

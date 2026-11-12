@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import json
 import logging
 import os
 import random
@@ -154,16 +153,8 @@ def parse_args():
     parser.add_argument(
         "--output",
         type=str,
-        default="multilingual_corpus.jsonl",
-        help="Output file path (.jsonl or .tsv)",
-    )
-    parser.add_argument(
-        "--output-format",
-        "--format",
-        dest="output_format",
-        choices=("jsonl", "tsv"),
-        default="tsv",
-        help="Output record format: jsonl or tsv (default)",
+        default="multilingual_corpus.tsv",
+        help="Output TSV file path",
     )
     parser.add_argument(
         "--min-char-len",
@@ -183,15 +174,7 @@ def parse_args():
     return args
 
 
-def format_output_record(lang, text, doc_bytes, output_format):
-    if output_format == "jsonl":
-        output_obj = {
-            "text": text,
-            "dataset_subset": lang,
-            "byte_length": doc_bytes,
-        }
-        return (json.dumps(output_obj, ensure_ascii=False) + "\n").encode("utf-8")
-
+def format_output_record(lang, text, doc_bytes):
     safe_text = text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
     return f"{doc_bytes}\t{lang}\t{safe_text}\n".encode("utf-8")
 
@@ -243,7 +226,6 @@ def write_language_shards(
     target_bytes: int,
     temp_dir: Path,
     min_char_len: int,
-    output_format: str,
 ):
     if target_bytes <= 0:
         return [], 0
@@ -287,9 +269,7 @@ def write_language_shards(
                 current_bytes = 0
                 shard_paths.append(shard_path)
 
-            current_handle.write(
-                format_output_record(lang, text, doc_bytes, output_format)
-            )
+            current_handle.write(format_output_record(lang, text, doc_bytes))
             current_bytes += doc_bytes
             total_written_bytes += doc_bytes
 
@@ -389,7 +369,6 @@ def main(args):
                 target_bytes=target_bytes_per_lang[lang],
                 temp_dir=temp_dir,
                 min_char_len=args.min_char_len,
-                output_format=args.output_format,
             )
             shard_paths.extend(lang_shards)
             collected_bytes[lang] = written_bytes
