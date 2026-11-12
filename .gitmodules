@@ -1,0 +1,8 @@
+[submodule "TokCollate"]
+	path = TokCollate
+	url = https://github.com/ufal/TokCollate
+	branch = main
+[submodule "oellm-eval"]
+	path = oellm-eval
+	url = https://github.com/OpenEuroLLM/oellm-eval
+	branch = main
