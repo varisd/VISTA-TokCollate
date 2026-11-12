@@ -162,8 +162,8 @@ def parse_args():
         "--format",
         dest="output_format",
         choices=("jsonl", "tsv"),
-        default="jsonl",
-        help="Output record format: jsonl (default) or tsv",
+        default="tsv",
+        help="Output record format: jsonl or tsv (default)",
     )
     parser.add_argument(
         "--min-char-len",
