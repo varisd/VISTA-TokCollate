@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 import random
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterator
 
 DEFAULT_VALID_RATIO = 0.01
 DEFAULT_MIN_VALID_SAMPLES = 100
@@ -24,12 +24,11 @@ DEFAULT_MAX_VALID_SAMPLES = 5000
 DEFAULT_SEED = 42
 
 
-def extract_texts(path: Path) -> List[str]:
-    """Return only non-empty text values from a TSV corpus file."""
+def iter_tsv_texts(path: Path) -> Iterator[str]:
+    """Yield non-empty text values from a TSV corpus file."""
     if path.suffix.lower() != ".tsv":
         raise ValueError(f"Unsupported corpus format for {path}. Expected a .tsv file.")
 
-    texts: List[str] = []
     with path.open("r", encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             line = raw_line.strip()
@@ -47,8 +46,7 @@ def extract_texts(path: Path) -> List[str]:
 
             text = fields[-1]
             if text:
-                texts.append(text)
-    return texts
+                yield text
 
 
 def compute_valid_count(total: int, valid_ratio: float, min_valid_samples: int, max_valid_samples: int) -> int:
@@ -63,11 +61,8 @@ def compute_valid_count(total: int, valid_ratio: float, min_valid_samples: int, 
     return valid_count
 
 
-def write_lines(path: Path, rows: Iterable[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(f"{row}\n")
+def count_usable_rows(input_path: Path) -> int:
+    return sum(1 for _ in iter_tsv_texts(input_path))
 
 
 def split_dataset(
@@ -79,20 +74,17 @@ def split_dataset(
     seed: int = DEFAULT_SEED,
     output_dir: Path | None = None,
 ) -> tuple[Path, Path]:
-    """Shuffle and split a TSV dataset into train/valid text files."""
+    """Shuffle and split a TSV dataset into train/valid text files with bounded memory usage."""
     if not input_path.exists():
         raise FileNotFoundError(f"Corpus file not found: {input_path}")
 
-    texts = extract_texts(input_path)
-    if not texts:
+    total_rows = count_usable_rows(input_path)
+    if total_rows == 0:
         raise ValueError(f"No usable text rows were found in {input_path}.")
 
     rng = random.Random(seed)
-    rng.shuffle(texts)
-
-    valid_count = compute_valid_count(len(texts), valid_ratio, min_valid_samples, max_valid_samples)
-    train_rows = texts[valid_count:]
-    valid_rows = texts[:valid_count]
+    valid_count = compute_valid_count(total_rows, valid_ratio, min_valid_samples, max_valid_samples)
+    valid_indices = set(rng.sample(range(total_rows), valid_count))
 
     if output_dir is None:
         output_dir = input_path.parent
@@ -100,8 +92,13 @@ def split_dataset(
     train_path = output_dir / f"{input_path.stem}.train.txt"
     valid_path = output_dir / f"{input_path.stem}.valid.txt"
 
-    write_lines(train_path, train_rows)
-    write_lines(valid_path, valid_rows)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with train_path.open("w", encoding="utf-8") as train_handle, valid_path.open("w", encoding="utf-8") as valid_handle:
+        for row_index, text in enumerate(iter_tsv_texts(input_path)):
+            if row_index in valid_indices:
+                valid_handle.write(f"{text}\n")
+            else:
+                train_handle.write(f"{text}\n")
 
     return train_path, valid_path
 
