@@ -112,12 +112,15 @@ bash download_monolingual_data.sh          # all five languages
 The 350M runs use FineWeb and FineWeb-2:
 
 ```bash
-python scripts/download_fineweb.py         # HuggingFaceFW/fineweb, sample-10BT
-bash download_fineweb2.sh                  # HuggingFaceFW/fineweb-2, four languages
+python scripts/download_fineweb.py                       # HuggingFaceFW/fineweb, sample-10BT
+python scripts/download_fineweb2_multilingual.py --list-languages
+python scripts/download_fineweb2_multilingual.py --languages eng_Latn,deu_Latn,rus_Cyrl,cmn_Hani --target-bytes 1000000000 --output data/fineweb2_multilingual.jsonl
 ```
 
-`download_fineweb2.sh` caps the Thai and Vietnamese downloads using the tokenized English file as a
-size reference, so run the English 350M pipeline before it.
+The new script replaces the old single-purpose FineWeb-2 shell downloader. It streams remote Parquet
+files directly from Hugging Face, lets you select a custom language mix and ratio, and writes either
+JSONL or TSV output with temp-shard buffering and retry handling. The older workflow was a simple
+language-by-language download; this version is a mixed-corpus builder for multilingual training data.
 
 **3. Byte-premium splits** (130M path only). Carves each corpus into a `byte_premium × 1 GiB` train
 split and a held-out eval split of `8000 × byte_premium` lines:
@@ -249,7 +252,11 @@ in the config files is a placeholder; the trainer sets it from the tokenizer in 
 │
 ├── download_tokenizers.sh         Fetch the 90 tokenizers
 ├── download_monolingual_data.sh   Fetch the monolingual corpora
-├── download_fineweb2.sh           Fetch FineWeb-2 raw text
+├── download_fineweb2.sh           Backward-compatible wrapper to the multilingual FineWeb-2 downloader
+├── scripts/
+│   ├── download_fineweb2_multilingual.py  Mixed-language FineWeb-2 corpus builder
+│   ├── split_tokenized.py
+│   └── tokenize_and_pack.py
 ├── create_byte_premium_sets.sh    Build byte-premium train/eval splits
 │
 ├── launch_monolingual.sh          130M sweep

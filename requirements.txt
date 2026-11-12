@@ -3,6 +3,7 @@ transformers
 tensorly
 tokenizers
 datasets
+pyarrow
 peft
 wandb
 loguru
