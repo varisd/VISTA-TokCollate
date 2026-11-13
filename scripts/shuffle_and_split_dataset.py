@@ -72,6 +72,8 @@ def shuffle_tsv_file(
     *,
     seed: int = DEFAULT_SEED,
     chunk_size: int = DEFAULT_SHUFFLE_CHUNK_SIZE,
+    temp_dir: Path | None = None,
+    keep_temp: bool = False,
 ) -> None:
     """Shuffle a TSV file with bounded memory via chunked external shuffling."""
     if not input_path.exists():
@@ -79,12 +81,16 @@ def shuffle_tsv_file(
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
 
+    base_temp_dir = temp_dir if temp_dir is not None else input_path.parent
+    base_temp_dir.mkdir(parents=True, exist_ok=True)
+
     rng = random.Random(seed)
     chunk_paths: list[Path] = []
     current_chunk: list[str] = []
+    chunk_dir = None
 
-    with tempfile.TemporaryDirectory(prefix=f"{input_path.stem}_shuffle_chunk_") as tmpdir_name:
-        chunk_dir = Path(tmpdir_name)
+    try:
+        chunk_dir = Path(tempfile.mkdtemp(prefix=f"{input_path.stem}_shuffle_chunk_", dir=str(base_temp_dir)))
         with input_path.open("r", encoding="utf-8") as source_handle:
             for raw_line in source_handle:
                 if not raw_line.strip():
@@ -108,6 +114,9 @@ def shuffle_tsv_file(
             for chunk_path in chunk_paths:
                 with chunk_path.open("r", encoding="utf-8") as chunk_handle:
                     shutil.copyfileobj(chunk_handle, output_handle)
+    finally:
+        if not keep_temp and chunk_dir is not None and chunk_dir.exists():
+            shutil.rmtree(chunk_dir, ignore_errors=True)
 
 
 def _write_shuffled_chunk(lines: list[str], rng: random.Random, temp_dir: Path) -> Path:
@@ -127,6 +136,8 @@ def shuffle_and_split_dataset(
     seed: int = DEFAULT_SEED,
     output_dir: Path | None = None,
     shuffle_chunk_size: int = DEFAULT_SHUFFLE_CHUNK_SIZE,
+    temp_dir: Path | None = None,
+    keep_temp: bool = False,
 ) -> tuple[Path, Path]:
     """Shuffle a TSV corpus externally, then split it into train/validation text files."""
     if not input_path.exists():
@@ -142,13 +153,21 @@ def shuffle_and_split_dataset(
         output_dir = input_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix=f"{input_path.stem}_shuffle_") as tmpdir_name:
-        shuffled_path = Path(tmpdir_name) / f"{input_path.stem}.shuffled.tsv"
+    if temp_dir is None:
+        temp_dir = input_path.parent
+    temp_dir = Path(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    tmpdir = Path(tempfile.mkdtemp(prefix=f"{input_path.stem}_shuffle_", dir=str(temp_dir)))
+    try:
+        shuffled_path = tmpdir / f"{input_path.stem}.shuffled.tsv"
         shuffle_tsv_file(
             input_path,
             shuffled_path,
             seed=seed,
             chunk_size=shuffle_chunk_size,
+            temp_dir=tmpdir,
+            keep_temp=True,
         )
 
         train_path = output_dir / f"{input_path.stem}.train.txt"
@@ -161,6 +180,9 @@ def shuffle_and_split_dataset(
                     valid_handle.write(f"{text}\n")
                 else:
                     train_handle.write(f"{text}\n")
+    finally:
+        if not keep_temp and tmpdir.exists():
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     return train_path, valid_path
 
@@ -181,6 +203,16 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SHUFFLE_CHUNK_SIZE,
         help="Number of lines to keep in RAM per shuffle chunk; lower values use less memory.",
     )
+    parser.add_argument(
+        "--temp-dir",
+        type=Path,
+        help="Directory for temporary shuffle chunks. Defaults to the input file's directory.",
+    )
+    parser.add_argument(
+        "--keep-temp",
+        action="store_true",
+        help="Keep the temporary chunk directory on disk after the run for debugging; default is to delete it.",
+    )
     return parser.parse_args()
 
 
@@ -195,6 +227,8 @@ def main() -> int:
         seed=args.seed,
         output_dir=output_dir,
         shuffle_chunk_size=args.shuffle_chunk_size,
+        temp_dir=args.temp_dir,
+        keep_temp=args.keep_temp,
     )
 
     print(f"Input rows: {sum(1 for _ in open(args.input, 'r', encoding='utf-8')) - 1:,}")
