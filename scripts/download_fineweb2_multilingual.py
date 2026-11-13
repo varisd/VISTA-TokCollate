@@ -295,39 +295,26 @@ def write_language_shards(
 
 
 def merge_shards(shard_paths, output_path, rng=None, batch_size=MERGE_BATCH_SIZE):
-    """Merge temporary shards in streaming batches so the corpus is shuffled without keeping all rows in memory."""
+    """Merge temporary shards in their current order.
+
+    Download-time shuffling is intentionally omitted here; the full corpus shuffle is
+    performed later at the split stage, where it can be done with bounded memory and
+    without re-ordering only a few local shard batches.
+    """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    if rng is None:
-        rng = random.Random()
 
     ordered_shards = list(shard_paths)
-    if len(ordered_shards) > 1:
-        rng.shuffle(ordered_shards)
-
     logger.info(
-        "Merging %d shards with batch shuffle (batch size: %d records) into %s...",
+        "Merging %d shards into %s without download-time shuffling...",
         len(ordered_shards),
-        batch_size,
         output_path,
     )
 
-    batch = []
     with open(output_path, "wb") as out_f:
         for shard_path in ordered_shards:
             with open(shard_path, "rb") as shard_f:
-                for raw_line in shard_f:
-                    if not raw_line:
-                        continue
-                    batch.append(raw_line)
-                    if len(batch) >= batch_size:
-                        rng.shuffle(batch)
-                        out_f.write(b"".join(batch))
-                        batch.clear()
-
-        if batch:
-            rng.shuffle(batch)
-            out_f.write(b"".join(batch))
+                shutil.copyfileobj(shard_f, out_f)
 
 
 def resolve_temp_base(cli_temp_dir, output_path: Path):
