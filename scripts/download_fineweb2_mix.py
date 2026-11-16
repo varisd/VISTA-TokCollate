@@ -126,6 +126,28 @@ def parse_mixing_ratios(ratio_str, selected_langs):
         return {l: 1.0 / len(selected_langs) for l in selected_langs}
 
 
+def compute_natural_ratios(
+    fs: HfFileSystem, selected_langs: list[str], alpha: float = 0.7
+) -> dict[str, float]:
+    """Compute mixing ratios from total remote Parquet byte sizes with optional temperature smoothing."""
+    raw_sizes: dict[str, int] = {}
+    for lang in selected_langs:
+        paths = get_parquet_paths(fs, lang)
+        sample = paths[:50]
+        sample_bytes = sum(fs.info(p).get("size", 0) for p in sample)
+        est_total = int(sample_bytes * (len(paths) / max(1, len(sample))))
+        raw_sizes[lang] = max(1, est_total)
+
+    # Cap eng_Latn at 2x the largest FineWeb-2 language so full FineWeb (~44TB) doesn't drown everything
+    non_eng = [sz for l, sz in raw_sizes.items() if l != "eng_Latn"]
+    if "eng_Latn" in raw_sizes and non_eng:
+        raw_sizes["eng_Latn"] = min(raw_sizes["eng_Latn"], max(non_eng) * 2)
+
+    weights = {l: (sz ** alpha) for l, sz in raw_sizes.items()}
+    total_w = sum(weights.values())
+    return {l: weights[l] / total_w for l in selected_langs}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Stream and mix FineWeb-2 corpora by byte budget with low memory overhead"
@@ -150,6 +172,17 @@ def parse_args():
         "--ratios",
         type=str,
         help="Custom mixing ratios, e.g. deu_Latn:0.5,rus_Cyrl:0.5",
+    )
+    parser.add_argument(
+        "--natural-ratios",
+        action="store_true",
+        help="Infer mixing ratios from actual dataset sizes on Hugging Face",
+    )
+    parser.add_argument(
+        "--ratio-alpha",
+        type=float,
+        default=0.7,
+        help="Temperature exponent for --natural-ratios (1.0 = exact raw size, 0.7 = smoothed, 0.0 = uniform)",
     )
     parser.add_argument(
         "--output",
@@ -354,7 +387,10 @@ def main(args):
         )
         return 1
 
-    mixing_ratios = parse_mixing_ratios(args.ratios, selected_langs)
+    if args.natural_ratios:
+        mixing_ratios = compute_natural_ratios(fs, selected_langs, alpha=args.ratio_alpha)
+    else:
+        mixing_ratios = parse_mixing_ratios(args.ratios, selected_langs)
 
     logger.info("Planned composition of the output corpus:")
     for lang in selected_langs:
