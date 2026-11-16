@@ -301,7 +301,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-bytes",
         type=int,
-        default=None,
+        default=2_000_000_000,
         help="Maximum UTF-8 bytes to read from the corpus (e.g. 2000000000 for 2GB). Recommended for 50GB+ files, especially Unigram.",
     )
     parser.add_argument(
