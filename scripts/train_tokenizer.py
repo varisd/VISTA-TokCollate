@@ -10,11 +10,12 @@ Supported tokenizer families:
 Default save location:
     data/tokenizers/tokenizer.<tokenizer_type>.<vocab_size>
 """
-
 from __future__ import annotations
 
 import argparse
 import json
+import unicodedata
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional
@@ -22,10 +23,9 @@ from typing import Iterator, List, Optional
 from tokenizers import Tokenizer
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.decoders import Metaspace as MetaspaceDecoder
-from tokenizers.decoders import WordPiece as WordPieceDecoder
 from tokenizers.models import BPE, Unigram, WordPiece
 from tokenizers.normalizers import NFKC, Sequence
-from tokenizers.pre_tokenizers import ByteLevel, Metaspace, Whitespace
+from tokenizers.pre_tokenizers import ByteLevel, Metaspace
 from tokenizers.trainers import BpeTrainer, UnigramTrainer, WordPieceTrainer
 
 
@@ -135,6 +135,7 @@ def train_bpe(
         vocab_size=vocab_size,
         min_frequency=min_frequency,
         special_tokens=special_tokens,
+        initial_alphabet=ByteLevel.alphabet(),
         show_progress=True,
     )
     iterator = batch_iterator(
@@ -185,12 +186,79 @@ def train_wordpiece(
         min_frequency=min_frequency,
         special_tokens=special_tokens,
         continuing_subword_prefix="##",
+        initial_alphabet=ByteLevel.alphabet(),
         show_progress=True,
     )
     iterator = batch_iterator(
         corpus_path, batch_size=batch_size, max_lines=max_lines, max_bytes=max_bytes
     )
     tokenizer.train_from_iterator(iterator, trainer=trainer)
+
+
+def _dominant_script(line: str) -> str:
+    """Classify a document by its dominant Unicode script (e.g., LATIN, CYRILLIC, ARABIC, HAN)."""
+    counts: dict[str, int] = defaultdict(int)
+    # Sampling from the first 512 characters in a doc should be enough to determine the document script.
+    for ch in line[:512]:
+        if ch.isalpha():
+            name = unicodedata.name(ch, "")
+            script = name.split(" ", 1)[0] if name else "OTHER"
+            counts[script] += 1
+    return max(counts, key=counts.get) if counts else "OTHER"
+
+
+def parity_balanced_iterator(
+    corpus_path: Path,
+    batch_size: int = 10_000,
+    max_lines: Optional[int] = None,
+    max_bytes: Optional[int] = None,
+    alpha: float = 0.2,
+) -> Iterator[List[str]]:
+    """Re-weight document frequency across scripts using temperature sampling (p_s^alpha)
+    so low-resource scripts achieve token-length parity with high-resource scripts.
+    """
+    docs_by_script: dict[str, List[str]] = defaultdict(list)
+    bytes_read = 0
+    lines_read = 0
+
+    with corpus_path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if max_lines is not None and lines_read >= max_lines:
+                break
+            line_bytes = len(line.encode("utf-8"))
+            if max_bytes is not None and (bytes_read + line_bytes) > max_bytes:
+                break
+            bytes_read += line_bytes
+            lines_read += 1
+
+            stripped = line.rstrip("\n")
+            if stripped.strip():
+                docs_by_script[_dominant_script(stripped)].append(stripped)
+
+    if not docs_by_script:
+        return
+
+    raw_bytes = {s: sum(len(d.encode("utf-8")) for d in docs) for s, docs in docs_by_script.items()}
+    weights = {s: (b ** alpha) for s, b in raw_bytes.items()}
+    total_w = sum(weights.values())
+    total_target_bytes = sum(raw_bytes.values())
+
+    batch: List[str] = []
+    for script, docs in docs_by_script.items():
+        target_bytes = int(total_target_bytes * (weights[script] / total_w))
+        emitted = 0
+        idx = 0
+        while emitted < target_bytes:
+            doc = docs[idx % len(docs)]
+            batch.append(doc)
+            emitted += len(doc.encode("utf-8"))
+            idx += 1
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+
+    if batch:
+        yield batch
 
 
 def train_parity_aware(
@@ -203,50 +271,21 @@ def train_parity_aware(
     max_lines: Optional[int],
     max_bytes: Optional[int],
 ) -> None:
-    # Reserve capacity inside vocab_size so adding booster tokens does not exceed the target budget
-    per_parity_quota = max(2, vocab_size // 200)
-    reserved_booster_slots = per_parity_quota * 2
-    base_vocab_size = max(len(special_tokens) + 256, vocab_size - reserved_booster_slots)
-
-    train_bpe(
-        tokenizer,
+    trainer = BpeTrainer(
+        vocab_size=vocab_size,
+        min_frequency=min_frequency,
+        special_tokens=special_tokens,
+        initial_alphabet=ByteLevel.alphabet(),
+        show_progress=True,
+    )
+    iterator = parity_balanced_iterator(
         corpus_path,
-        base_vocab_size,
-        min_frequency,
-        special_tokens,
         batch_size=batch_size,
         max_lines=max_lines,
         max_bytes=max_bytes,
+        alpha=0.2,
     )
-
-    vocab = tokenizer.get_vocab()
-    if not vocab:
-        raise RuntimeError("Parity-aware training did not produce a vocabulary.")
-
-    balanced_tokens: List[str] = []
-    parity_map: dict[int, List[str]] = {0: [], 1: []}
-
-    for token in vocab:
-        if token in special_tokens:
-            continue
-        if not token or token.startswith("##"):
-            continue
-        if token.isascii() and token.isalpha():
-            parity = sum(ord(ch) for ch in token) % 2
-            parity_map[parity].append(token)
-
-    remaining_slots = max(0, vocab_size - tokenizer.get_vocab_size())
-    per_side = remaining_slots // 2
-
-    for parity in (0, 1):
-        bucket = sorted(parity_map[parity], key=lambda item: vocab[item], reverse=True)
-        for token in bucket[:per_side]:
-            candidate = f"<parity_{parity}_{token[:8]}>"
-            if candidate not in vocab and candidate not in balanced_tokens:
-                balanced_tokens.append(candidate)
-
-    if balanced_tokens:
-        tokenizer.add_special_tokens(balanced_tokens)
+    tokenizer.train_from_iterator(iterator, trainer=trainer)
 
 
 def parse_args() -> argparse.Namespace:
