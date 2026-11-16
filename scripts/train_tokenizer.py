@@ -103,16 +103,16 @@ def build_bpe_tokenizer() -> Tokenizer:
 def build_unigram_tokenizer() -> Tokenizer:
     tokenizer = Tokenizer(Unigram())
     tokenizer.normalizer = Sequence([NFKC()])
-    tokenizer.pre_tokenizer = Metaspace()
-    tokenizer.decoder = MetaspaceDecoder()
+    tokenizer.pre_tokenizer = Metaspace(prepend_scheme="never")
+    tokenizer.decoder = MetaspaceDecoder(prepend_scheme="never")
     return tokenizer
 
 
 def build_wordpiece_tokenizer() -> Tokenizer:
     tokenizer = Tokenizer(WordPiece(unk_token="<unk>"))
     tokenizer.normalizer = Sequence([NFKC()])
-    tokenizer.pre_tokenizer = Whitespace()
-    tokenizer.decoder = WordPieceDecoder(prefix="##")
+    tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
+    tokenizer.decoder = ByteLevelDecoder()
     return tokenizer
 
 
