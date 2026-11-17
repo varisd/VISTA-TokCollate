@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
-"""Shuffle a large TSV corpus and split it into train/validation text files.
+"""Shuffle a large TSV corpus and split it into train/validation files.
 
-This stage intentionally performs the randomization after download, because the
-final corpus file can be tens of GB and should not be fully resident in memory.
-The shuffle is implemented with a chunked external shuffle: we stream the input,
-randomize chunks in memory, and then merge the shuffled chunks in a random order.
-This keeps memory bounded while still giving a much better mix than local shard
-batch shuffles performed during download.
+Preserves the original TSV schema (`bytes\tlanguage\ttext`) in the split outputs
+by default (or writes plain text if `--plain-text` is passed), while streaming
+with bounded memory via chunked external shuffling.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import random
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Iterator
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+    force=True,
+)
+logger = logging.getLogger(__name__)
 
 DEFAULT_VALID_RATIO = 0.01
 DEFAULT_MIN_VALID_SAMPLES = 100
@@ -25,29 +33,29 @@ DEFAULT_SEED = 42
 DEFAULT_SHUFFLE_CHUNK_SIZE = 100_000
 
 
-def iter_tsv_texts(path: Path) -> Iterator[str]:
-    """Yield non-empty text values from a TSV corpus file."""
+def iter_tsv_rows(path: Path) -> Iterator[tuple[str, str, str]]:
+    """Yield (doc_bytes, language, text) tuples from a TSV corpus file."""
     if path.suffix.lower() != ".tsv":
         raise ValueError(f"Unsupported corpus format for {path}. Expected a .tsv file.")
 
-    with path.open("r", encoding="utf-8") as handle:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
-            line = raw_line.strip()
-            if not line:
+            line = raw_line.rstrip("\r\n")
+            if not line.strip():
                 continue
 
-            fields = [part.strip() for part in line.split("\t")]
+            fields = line.split("\t", maxsplit=2)
             if len(fields) < 3:
                 raise ValueError(
                     f"TSV row in {path} at line {line_number} does not contain the required columns: bytes, language, text."
                 )
 
-            if fields[0].lower() == "bytes" and fields[1].lower() in {"lang", "language"}:
+            doc_bytes, lang, text = fields[0].strip(), fields[1].strip(), fields[2].strip()
+            if doc_bytes.lower() == "bytes" and lang.lower() in {"lang", "language"}:
                 continue
 
-            text = fields[-1]
             if text:
-                yield text
+                yield doc_bytes, lang, text
 
 
 def compute_valid_count(total: int, valid_ratio: float, min_valid_samples: int, max_valid_samples: int) -> int:
@@ -63,7 +71,15 @@ def compute_valid_count(total: int, valid_ratio: float, min_valid_samples: int, 
 
 
 def count_usable_rows(input_path: Path) -> int:
-    return sum(1 for _ in iter_tsv_texts(input_path))
+    return sum(1 for _ in iter_tsv_rows(input_path))
+
+
+def _write_shuffled_chunk(lines: list[str], rng: random.Random, temp_dir: Path, chunk_index: int) -> Path:
+    rng.shuffle(lines)
+    chunk_path = temp_dir / f"chunk_{chunk_index:05d}.tsv"
+    with chunk_path.open("w", encoding="utf-8") as handle:
+        handle.writelines(lines)
+    return chunk_path
 
 
 def shuffle_tsv_file(
@@ -91,17 +107,21 @@ def shuffle_tsv_file(
 
     try:
         chunk_dir = Path(tempfile.mkdtemp(prefix=f"{input_path.stem}_shuffle_chunk_", dir=str(base_temp_dir)))
-        with input_path.open("r", encoding="utf-8") as source_handle:
+        with input_path.open("r", encoding="utf-8", errors="replace") as source_handle:
             for raw_line in source_handle:
                 if not raw_line.strip():
                     continue
                 current_chunk.append(raw_line)
                 if len(current_chunk) >= chunk_size:
-                    chunk_paths.append(_write_shuffled_chunk(current_chunk, rng, chunk_dir))
+                    chunk_paths.append(
+                        _write_shuffled_chunk(current_chunk, rng, chunk_dir, len(chunk_paths))
+                    )
                     current_chunk = []
 
         if current_chunk:
-            chunk_paths.append(_write_shuffled_chunk(current_chunk, rng, chunk_dir))
+            chunk_paths.append(
+                _write_shuffled_chunk(current_chunk, rng, chunk_dir, len(chunk_paths))
+            )
 
         if not chunk_paths:
             raise ValueError(f"No usable rows found in {input_path}.")
@@ -119,14 +139,6 @@ def shuffle_tsv_file(
             shutil.rmtree(chunk_dir, ignore_errors=True)
 
 
-def _write_shuffled_chunk(lines: list[str], rng: random.Random, temp_dir: Path) -> Path:
-    rng.shuffle(lines)
-    chunk_path = temp_dir / f"chunk_{len(list(temp_dir.iterdir())):04d}.tsv"
-    with chunk_path.open("w", encoding="utf-8") as handle:
-        handle.writelines(lines)
-    return chunk_path
-
-
 def shuffle_and_split_dataset(
     input_path: Path,
     *,
@@ -138,11 +150,13 @@ def shuffle_and_split_dataset(
     shuffle_chunk_size: int = DEFAULT_SHUFFLE_CHUNK_SIZE,
     temp_dir: Path | None = None,
     keep_temp: bool = False,
-) -> tuple[Path, Path]:
-    """Shuffle a TSV corpus externally, then split it into train/validation text files."""
+    plain_text: bool = False,
+) -> tuple[Path, Path, int, int, int]:
+    """Shuffle a TSV corpus externally, then split it into train/validation files."""
     if not input_path.exists():
         raise FileNotFoundError(f"Corpus file not found: {input_path}")
 
+    logger.info("Counting usable rows in %s...", input_path)
     total_rows = count_usable_rows(input_path)
     if total_rows == 0:
         raise ValueError(f"No usable text rows were found in {input_path}.")
@@ -158,9 +172,16 @@ def shuffle_and_split_dataset(
     temp_dir = Path(temp_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)
 
+    ext = ".txt" if plain_text else ".tsv"
+    train_path = output_dir / f"{input_path.stem}.train{ext}"
+    valid_path = output_dir / f"{input_path.stem}.valid{ext}"
+
     tmpdir = Path(tempfile.mkdtemp(prefix=f"{input_path.stem}_shuffle_", dir=str(temp_dir)))
+    train_rows = 0
+    valid_rows = 0
     try:
         shuffled_path = tmpdir / f"{input_path.stem}.shuffled.tsv"
+        logger.info("Shuffling TSV into external chunks (chunk_size=%d)...", shuffle_chunk_size)
         shuffle_tsv_file(
             input_path,
             shuffled_path,
@@ -170,26 +191,27 @@ def shuffle_and_split_dataset(
             keep_temp=True,
         )
 
-        train_path = output_dir / f"{input_path.stem}.train.txt"
-        valid_path = output_dir / f"{input_path.stem}.valid.txt"
-
+        logger.info("Writing train/valid splits (%s format)...", "plain-text" if plain_text else "TSV")
         with train_path.open("w", encoding="utf-8") as train_handle, \
              valid_path.open("w", encoding="utf-8") as valid_handle:
-            for row_index, text in enumerate(iter_tsv_texts(shuffled_path)):
+            for row_index, (doc_bytes, lang, text) in enumerate(iter_tsv_rows(shuffled_path)):
+                out_line = f"{text}\n" if plain_text else f"{doc_bytes}\t{lang}\t{text}\n"
                 if row_index < valid_count:
-                    valid_handle.write(f"{text}\n")
+                    valid_handle.write(out_line)
+                    valid_rows += 1
                 else:
-                    train_handle.write(f"{text}\n")
+                    train_handle.write(out_line)
+                    train_rows += 1
     finally:
         if not keep_temp and tmpdir.exists():
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    return train_path, valid_path
+    return train_path, valid_path, total_rows, train_rows, valid_rows
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Shuffle a TSV corpus with bounded memory and split it into train/validation text files."
+        description="Shuffle a TSV corpus with bounded memory and split it into train/validation files."
     )
     parser.add_argument("--input", type=Path, required=True, help="TSV corpus file produced by the download step.")
     parser.add_argument("--output-dir", type=Path, help="Optional directory to write the split files into; defaults to the input file's directory.")
@@ -209,6 +231,11 @@ def parse_args() -> argparse.Namespace:
         help="Directory for temporary shuffle chunks. Defaults to the input file's directory.",
     )
     parser.add_argument(
+        "--plain-text",
+        action="store_true",
+        help="Write plain-text .txt files (text column only) instead of preserving TSV (bytes\tlanguage\ttext).",
+    )
+    parser.add_argument(
         "--keep-temp",
         action="store_true",
         help="Keep the temporary chunk directory on disk after the run for debugging; default is to delete it.",
@@ -219,7 +246,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     output_dir = args.output_dir if args.output_dir is not None else args.input.parent
-    train_path, valid_path = shuffle_and_split_dataset(
+    train_path, valid_path, total_rows, train_rows, valid_rows = shuffle_and_split_dataset(
         args.input,
         valid_ratio=args.valid_ratio,
         min_valid_samples=args.min_valid_samples,
@@ -229,13 +256,14 @@ def main() -> int:
         shuffle_chunk_size=args.shuffle_chunk_size,
         temp_dir=args.temp_dir,
         keep_temp=args.keep_temp,
+        plain_text=args.plain_text,
     )
 
-    print(f"Input rows: {sum(1 for _ in open(args.input, 'r', encoding='utf-8')) - 1:,}")
-    print(f"Train rows: {sum(1 for _ in open(train_path, 'r', encoding='utf-8')):,}")
-    print(f"Valid rows: {sum(1 for _ in open(valid_path, 'r', encoding='utf-8')):,}")
-    print(f"Train output: {train_path}")
-    print(f"Valid output: {valid_path}")
+    logger.info("Usable input rows: %s", f"{total_rows:,}")
+    logger.info("Train rows: %s", f"{train_rows:,}")
+    logger.info("Valid rows: %s", f"{valid_rows:,}")
+    logger.info("Train output: %s", train_path)
+    logger.info("Valid output: %s", valid_path)
     return 0
 
 
