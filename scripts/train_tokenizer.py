@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import unicodedata
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -21,13 +22,23 @@ from pathlib import Path
 from typing import Iterator, List, Optional
 
 from tokenizers import Tokenizer
+from tokenizers.decoders import ByteFallback, Replace
+from tokenizers.decoders import Sequence as DecoderSequence
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.decoders import Metaspace as MetaspaceDecoder
+from tokenizers.decoders import WordPiece as WordPieceDecoder
 from tokenizers.models import BPE, Unigram, WordPiece
 from tokenizers.normalizers import NFKC, Sequence
 from tokenizers.pre_tokenizers import ByteLevel, Metaspace
 from tokenizers.trainers import BpeTrainer, UnigramTrainer, WordPieceTrainer
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    force=True,
+)
+logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_PREFIX = Path("data/tokenizers/tokenizer")
 DEFAULT_SPECIAL_TOKENS = ["<unk>", "<pad>", "<bos>", "<eos>", "<mask>"]
@@ -83,6 +94,8 @@ def batch_iterator(
 
             stripped = line.rstrip("\n")
             if stripped.strip():
+                if len(stripped) > 50_000:
+                    stripped = stripped[:50_000]
                 batch.append(stripped)
                 if len(batch) >= batch_size:
                     yield batch
@@ -103,8 +116,11 @@ def build_bpe_tokenizer() -> Tokenizer:
 def build_unigram_tokenizer() -> Tokenizer:
     tokenizer = Tokenizer(Unigram())
     tokenizer.normalizer = Sequence([NFKC()])
-    tokenizer.pre_tokenizer = Metaspace(prepend_scheme="never")
-    tokenizer.decoder = MetaspaceDecoder(prepend_scheme="never")
+    tokenizer.pre_tokenizer = Metaspace(prepend_scheme="never", split=False)
+    tokenizer.decoder = DecoderSequence([
+        ByteFallback(),
+        MetaspaceDecoder(prepend_scheme="never"),
+    ])
     return tokenizer
 
 
@@ -112,7 +128,10 @@ def build_wordpiece_tokenizer() -> Tokenizer:
     tokenizer = Tokenizer(WordPiece(unk_token="<unk>"))
     tokenizer.normalizer = Sequence([NFKC()])
     tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
-    tokenizer.decoder = ByteLevelDecoder()
+    tokenizer.decoder = DecoderSequence([
+        Replace("##", ""),
+        ByteLevelDecoder()
+    ])
     return tokenizer
 
 
@@ -340,7 +359,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-bytes",
         type=int,
-        default=2_000_000_000,
+        default=500_000_000,
         help="Maximum UTF-8 bytes to read from the corpus (e.g. 2000000000 for 2GB). Recommended for 50GB+ files, especially Unigram.",
     )
     parser.add_argument(
@@ -369,6 +388,7 @@ def main() -> int:
     special_tokens = list(dict.fromkeys(args.special_tokens))
     tokenizer_type = args.tokenizer_type
 
+    logger.info("Training tokenizer %s, vocabulary size %i", tokenizer_type, args.vocab_size)
     if tokenizer_type == "bpe":
         tokenizer = build_bpe_tokenizer()
         train_bpe(
@@ -433,9 +453,8 @@ def main() -> int:
         max_lines=args.max_lines,
     )
 
-    print(f"Saved tokenizer: {tokenizer_path}")
-    print(f"Target vocab size: {args.vocab_size} | Actual vocab size: {tokenizer.get_vocab_size()}")
-    print(f"Output dir: {output_dir}")
+    logger.info("Saved tokenizer: %s", tokenizer_path)
+    logger.info("Target vocab size: %i | Actual vocab size: %i", args.vocab_size, tokenizer.get_vocab_size())
     return 0
 
 
