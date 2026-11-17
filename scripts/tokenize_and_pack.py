@@ -1,272 +1,245 @@
-"""
-Tokenize BP train/eval splits using the same approach as the reference script:
-- Batch-wise tokenization of raw lines
-- Concatenate consecutive non-empty lines into a single example until
-  max_seq_len is reached or max_segments is reached
-- Optionally prepend CLS and append SEP after each segment (line)
-- Truncate to max_seq_len and write a single line of space-separated token ids
-- No padding on disk
+#!/usr/bin/env python3
+"""Tokenize a TSV corpus split and pack token IDs into fixed-length sequences."""
 
-This mirrors scripts/tokenize_dataset.py from:
-https://github.com/tylerachang/word-acquisition-language-models
-"""
+from __future__ import annotations
 
 import argparse
-import json
-import os
+import logging
 import sys
-import codecs
-import shutil
-import subprocess
+from collections.abc import Iterator
 from pathlib import Path
-from typing import List, Optional
 
-from transformers import AutoTokenizer, AlbertTokenizer
+from tokenizers import Tokenizer
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from utils.local_config import get_data_root
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+    force=True,
+)
+logger = logging.getLogger(__name__)
 
-_DATA_ROOT = get_data_root()
-
-VALID_VOCABS = {8192, 32768, 65536, 98304}
-DATASETS = ["TODO"]
-
-TOKENIZER_ROOTS = {
-    "bpe": "TODO",
-    "parity_aware_bpe": "TODO",
-    "wordpiece": "TODO",
-}
-
-TOKENIZER_DATASET_MAP = {"TODO": "TODO"}
+DEFAULT_MAX_SEQ_LEN = 1024
+DEFAULT_BATCH_SIZE = 4096
+BOS_CANDIDATES = ("<bos>", "<cls>", "<s>")
+EOS_CANDIDATES = ("<eos>", "<sep>", "</s>")
 
 
-def build_tokenizer_path(dataset: str, tokenizer_type: str, vocab: int) -> str:
-    tok_dataset = TOKENIZER_DATASET_MAP.get(dataset, dataset)
-    root = TOKENIZER_ROOTS[tokenizer_type]
-    if tokenizer_type == "bpe_unscaled":
-        fname = f"bpe_{tok_dataset}_{vocab}_300mb_unscaled.json"
-    else:
-        fname = f"unigram_{tok_dataset}_{vocab}_300mb_unscaled.json"
-    return os.path.join(root, fname)
+def iter_tsv_texts(path: Path) -> Iterator[str]:
+    """Yield non-empty text records from a `bytes\tlanguage\ttext` TSV file."""
+    if path.suffix.lower() != ".tsv":
+        raise ValueError(f"Unsupported input format for {path}. Expected a .tsv file.")
+
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.rstrip("\r\n")
+            if not line.strip():
+                continue
+
+            parts = line.split("\t", maxsplit=2)
+            if len(parts) < 3:
+                raise ValueError(
+                    f"TSV row in {path} at line {line_number} must have 3 columns: bytes, language, text."
+                )
+
+            if parts[0].strip().lower() == "bytes" and parts[1].strip().lower() in {"lang", "language"}:
+                continue
+
+            text = parts[2]
+            if text.strip():
+                yield text
 
 
-MAX_STORED_LINE_COUNT = 10000
+def resolve_special_token_id(tokenizer: Tokenizer, candidates: tuple[str, ...]) -> int | None:
+    """Return the first matching special token ID present in the tokenizer vocabulary."""
+    for token in candidates:
+        token_id = tokenizer.token_to_id(token)
+        if token_id is not None:
+            return int(token_id)
+    return None
 
 
-def prepare_tokenizer_dir(json_path: str) -> str:
-    """
-    Create a minimal HF-compatible tokenizer directory next to the given JSON tokenizer file,
-    so AutoTokenizer.from_pretrained(dir) works without hard-coding special tokens.
-    - copies the JSON to 'tokenizer.json'
-    - generates 'special_tokens_map.json' by inspecting model.unk_token and added_tokens
-    """
-    base = os.path.splitext(os.path.basename(json_path))[0]
-    out_dir = os.path.join(os.path.dirname(json_path), base + "_hf")
-    os.makedirs(out_dir, exist_ok=True)
-    # Copy tokenizer.json
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    with open(os.path.join(out_dir, "tokenizer.json"), "w", encoding="utf-8") as f:
-        json.dump(data, f)
-    # Build special tokens map
-    special_map = {}
-    # unk
-    try:
-        unk = data.get("model", {}).get("unk_token")
-        if isinstance(unk, str):
-            special_map["unk_token"] = unk
-    except Exception:
-        pass
-    # added tokens
-    for tok in data.get("added_tokens", []) or []:
-        if not tok.get("special", False):
-            continue
-        content = tok.get("content")
-        if not isinstance(content, str):
-            continue
-        upper = content.upper()
-        if "CLS" in upper and "cls_token" not in special_map:
-            special_map["cls_token"] = content
-        if "SEP" in upper and "sep_token" not in special_map:
-            special_map["sep_token"] = content
-        if "MASK" in upper and "mask_token" not in special_map:
-            special_map["mask_token"] = content
-        if "PAD" in upper and "pad_token" not in special_map:
-            special_map["pad_token"] = content
-        if "BOS" in upper and "bos_token" not in special_map:
-            special_map["bos_token"] = content
-        if "EOS" in upper and "eos_token" not in special_map:
-            special_map["eos_token"] = content
-    # If eos_token missing but sep exists, do not guess here; let model config decide if needed
-    with open(os.path.join(out_dir, "special_tokens_map.json"), "w", encoding="utf-8") as f:
-        json.dump(special_map, f)
-    return out_dir
+def iter_batches(records: Iterator[str], batch_size: int) -> Iterator[list[str]]:
+    """Group an iterator of strings into fixed-size lists."""
+    batch: list[str] = []
+    for record in records:
+        batch.append(record)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
-def tokenize_file(input_path: str, output_path: str, tokenizer, max_seq_len: int,
-                  max_examples: int, max_segments: int,
-                  prepend_cls: bool, include_sep: bool) -> None:
-    from tqdm import tqdm
+def pack_tsv_to_token_ids(
+    *,
+    input_tsv: Path,
+    tokenizer: Tokenizer,
+    output_path: Path,
+    max_seq_len: int = DEFAULT_MAX_SEQ_LEN,
+    max_segments: int = -1,
+    prepend_cls: bool = False,
+    include_sep: bool = False,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> tuple[int, int]:
+    """Stream TSV documents, batch-encode them, and write packed sequences of length `max_seq_len`."""
+    if not input_tsv.exists():
+        raise FileNotFoundError(f"Input TSV not found: {input_tsv}")
+    if max_seq_len <= 0:
+        raise ValueError("--max-seq-len must be positive.")
+    if batch_size <= 0:
+        raise ValueError("--batch-size must be positive.")
 
-    print(f"Tokenizing file: {input_path}")
-    cls_token_id: Optional[int] = tokenizer.cls_token_id if prepend_cls else None
-    sep_token_id: Optional[int] = tokenizer.sep_token_id if include_sep else None
-    if prepend_cls and cls_token_id is None:
-        print("Warning: [CLS] token does not exist.")
-    if include_sep and sep_token_id is None:
-        print("Warning: [SEP] token does not exist.")
+    bos_id = resolve_special_token_id(tokenizer, BOS_CANDIDATES) if prepend_cls else None
+    eos_id = resolve_special_token_id(tokenizer, EOS_CANDIDATES) if include_sep else None
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    if os.path.isfile(output_path):
-        print(f"File already exists: {output_path}")
-        return
+    if prepend_cls and bos_id is None:
+        logger.warning("Requested --prepend-cls, but none of %s exist in vocabulary.", BOS_CANDIDATES)
+    if include_sep and eos_id is None:
+        logger.warning("Requested --include-sep, but none of %s exist in vocabulary.", EOS_CANDIDATES)
 
-    file_size = os.path.getsize(input_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    buffer: list[int] = []
+    segments_written = 0
+    docs_processed = 0
 
-    infile = codecs.open(input_path, "rb", encoding="utf-8", errors="replace")
-    outfile = codecs.open(output_path, "wb", encoding="utf-8")
-    example_count = 0
-    line_count = 0
-    stored_lines: List[str] = []
-    pbar = tqdm(total=file_size, unit="B", unit_scale=True, desc="Tokenizing")
-
-    def tokenize_batch() -> bool:
-        nonlocal stored_lines, example_count
-        curr_example: List[int] = [] if cls_token_id is None else [cls_token_id]
-        curr_n_segments = 0
-        enc = tokenizer(stored_lines, add_special_tokens=False, truncation=True, max_length=max_seq_len)
-        for tokenized_line in enc["input_ids"]:
-            curr_example = curr_example + tokenized_line
-            if sep_token_id is not None:
-                curr_example.append(sep_token_id)
-            curr_n_segments += 1
-            if len(curr_example) >= max_seq_len or curr_n_segments >= max_segments:
-                curr_example = curr_example[:max_seq_len]
-                outfile.write(" ".join(str(t) for t in curr_example))
-                outfile.write("\n")
-                curr_example = [] if cls_token_id is None else [cls_token_id]
-                curr_n_segments = 0
-                example_count += 1
-                if example_count >= max_examples:
-                    return True
-        stored_lines = []
-        return False
-
-    for line in infile:
-        line_count += 1
-        line_bytes = len(line.encode("utf-8", errors="replace"))
-        pbar.update(line_bytes)
-        s = line.strip()
-        if s != "":
-            stored_lines.append(s)
-        if line_count % MAX_STORED_LINE_COUNT == 0:
-            pbar.set_postfix(lines=f"{line_count:,}", examples=f"{example_count:,}")
-            completed = tokenize_batch()
-            if completed:
+    with output_path.open("w", encoding="utf-8") as out_handle:
+        for text_batch in iter_batches(iter_tsv_texts(input_tsv), batch_size=batch_size):
+            if max_segments > 0 and segments_written >= max_segments:
                 break
-    if len(stored_lines) > 0:
-        tokenize_batch()
-    pbar.close()
-    outfile.close()
-    infile.close()
-    print(f"Finished tokenization: {example_count:,} examples.")
+
+            encodings = tokenizer.encode_batch(text_batch, add_special_tokens=False)
+            for encoding in encodings:
+                if max_segments > 0 and segments_written >= max_segments:
+                    break
+
+                doc_ids = encoding.ids
+                if not doc_ids:
+                    continue
+
+                if bos_id is not None:
+                    buffer.append(bos_id)
+                buffer.extend(doc_ids)
+                if eos_id is not None:
+                    buffer.append(eos_id)
+                docs_processed += 1
+
+                while len(buffer) >= max_seq_len:
+                    if max_segments > 0 and segments_written >= max_segments:
+                        break
+                    chunk = buffer[:max_seq_len]
+                    buffer = buffer[max_seq_len:]
+                    out_handle.write(" ".join(map(str, chunk)) + "\n")
+                    segments_written += 1
+
+    return docs_processed, segments_written
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", required=True, choices=DATASETS)
-    parser.add_argument("--tokenizer_type", default="bpe_unscaled", choices=list(TOKENIZER_ROOTS.keys()))
-    parser.add_argument("--tokenizer_vocabulary", default="32768")
-    parser.add_argument("--split", choices=["train", "eval"], required=True)
-    parser.add_argument("--max_seq_len", type=int, default=1024)
-    parser.add_argument("--max_examples", type=int, default=-1)
-    parser.add_argument("--max_segments", type=int, default=-1)
-    parser.add_argument("--prepend_cls", type=str, default="True")
-    parser.add_argument("--include_sep", type=str, default="True")
-    parser.add_argument("--index_path", default=str(Path(__file__).parent.parent / "configs" / "monolingual_bp_index.json"))
-    parser.add_argument("--output_root", default=f"{_DATA_ROOT}/monolingual_training_data_tokenized")
-    parser.add_argument("--shuffle", type=str, default="auto",
-                        help="Shuffle output lines. 'auto' = shuffle for train only; 'True'/'False' to force.")
-    args = parser.parse_args()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Tokenize a TSV dataset split and pack token IDs into fixed-length sequences."
+    )
+    parser.add_argument(
+        "--input-tsv",
+        type=Path,
+        required=True,
+        help="Input TSV split file (bytes\tlanguage\ttext).",
+    )
+    parser.add_argument(
+        "--tokenizer-prefix",
+        type=Path,
+        default=Path("data/tokenizers-natural/base"),
+        help="Prefix path used when saving tokenizers (<prefix>.<tokenizer-type>.<vocab-size>/tokenizer.json).",
+    )
+    parser.add_argument(
+        "--tokenizer-type",
+        type=str,
+        required=True,
+        help="Tokenizer family name (e.g. bpe, wordpiece, parity_aware_bpe).",
+    )
+    parser.add_argument(
+        "--tokenizer-vocabulary",
+        type=int,
+        required=True,
+        help="Vocabulary size of the trained tokenizer.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional explicit output path. Defaults to <input-tsv-dir>/<stem>.<type>.<vocab>.packed.txt",
+    )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=DEFAULT_MAX_SEQ_LEN,
+        help="Fixed token sequence length per packed output line.",
+    )
+    parser.add_argument(
+        "--max-segments",
+        type=int,
+        default=-1,
+        help="Maximum packed sequences to write (-1 for unlimited).",
+    )
+    parser.add_argument(
+        "--prepend-cls",
+        action="store_true",
+        help="Prepend BOS/CLS token ID before each document.",
+    )
+    parser.add_argument(
+        "--include-sep",
+        action="store_true",
+        help="Append EOS/SEP token ID after each document.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help="Number of documents encoded per batch.",
+    )
+    return parser.parse_args()
 
-    vocab = int(args.tokenizer_vocabulary)
-    if vocab not in VALID_VOCABS:
-        raise ValueError(f"tokenizer_vocabulary must be one of {sorted(VALID_VOCABS)}")
 
-    with open(args.index_path, "r", encoding="utf-8") as f:
-        index = json.load(f)
-    if args.dataset not in index:
-        raise ValueError(f"Dataset {args.dataset} not found in index {args.index_path}")
-    entry = index[args.dataset]
-    bp = entry["byte_premium"]
-    src_path = entry["train_path"] if args.split == "train" else entry["eval_path"]
-    src_path = src_path.replace("${DATA_ROOT}", _DATA_ROOT)
+def main() -> int:
+    args = parse_args()
+    tokenizer_path = Path(
+        f"{args.tokenizer_prefix}.{args.tokenizer_type}.{args.tokenizer_vocabulary}/tokenizer.json"
+    ).resolve()
+    if not tokenizer_path.exists():
+        raise FileNotFoundError(f"Tokenizer file not found: {tokenizer_path}")
 
-    tok_path = build_tokenizer_path(args.dataset, args.tokenizer_type, vocab)
-    if not os.path.isfile(tok_path):
-        raise FileNotFoundError(f"Tokenizer not found: {tok_path}")
-    try:
-        # Prefer loading via a prepared directory so AutoTokenizer can discover special tokens cleanly
-        prepared_dir = prepare_tokenizer_dir(tok_path)
-        tokenizer = AutoTokenizer.from_pretrained(prepared_dir, trust_remote_code=True, use_fast=True)
-    except Exception as e:
-        print(f"Error loading tokenizer with AutoTokenizer: {e}")
-        raise
+    output_path = (
+        args.output
+        if args.output is not None
+        else args.input_tsv.parent
+        / f"{args.input_tsv.stem}.{args.tokenizer_type}.{args.tokenizer_vocabulary}.packed.txt"
+    )
 
-    tokenizer_name = os.path.splitext(os.path.basename(tok_path))[0]
-    subdir = os.path.join(args.output_root, tokenizer_name)
-    os.makedirs(subdir, exist_ok=True)
+    logger.info("Loading tokenizer: %s", tokenizer_path)
+    tokenizer = Tokenizer.from_file(str(tokenizer_path))
 
-    suffix = "" if args.split == "train" else "_eval"
-    out_file = os.path.join(subdir, f"{args.dataset}_{bp}{suffix}_tokenized.txt")
+    logger.info("Packing %s -> %s (max_seq_len=%d)", args.input_tsv, output_path, args.max_seq_len)
+    docs_processed, segments_written = pack_tsv_to_token_ids(
+        input_tsv=args.input_tsv.resolve(),
+        tokenizer=tokenizer,
+        output_path=output_path.resolve(),
+        max_seq_len=args.max_seq_len,
+        max_segments=args.max_segments,
+        prepend_cls=args.prepend_cls,
+        include_sep=args.include_sep,
+        batch_size=args.batch_size,
+    )
 
-    print(f"Tokenizing {src_path} with {tok_path}; writing to {out_file}")
-    import math
-    max_examples = math.inf if args.max_examples == -1 else args.max_examples
-    max_segments = math.inf if args.max_segments == -1 else args.max_segments
-    prepend_cls = args.prepend_cls.lower() == "true"
-    include_sep = args.include_sep.lower() == "true"
-    tokenize_file(src_path, out_file, tokenizer, args.max_seq_len,
-                  max_examples=max_examples, max_segments=max_segments,
-                  prepend_cls=prepend_cls, include_sep=include_sep)
-
-    # Decide whether to shuffle
-    if args.shuffle.lower() in {"true", "false"}:
-        do_shuffle = args.shuffle.lower() == "true"
-    else:
-        # auto: shuffle train, keep eval fixed
-        do_shuffle = args.split == "train"
-
-    def _shuffle_inplace(path: str) -> None:
-        print(f"Shuffling file in-place: {path}")
-        tmp_path = path + ".shuf.tmp"
-        terashuf = shutil.which("terashuf")
-        shuf = shutil.which("shuf")
-        try:
-            if terashuf is not None:
-                with open(tmp_path, "w", encoding="utf-8") as out:
-                    subprocess.run([terashuf, path], check=True, stdout=out)
-            elif shuf is not None:
-                with open(tmp_path, "w", encoding="utf-8") as out:
-                    subprocess.run([shuf, path], check=True, stdout=out)
-            else:
-                print("Warning: Neither 'terashuf' nor 'shuf' found on PATH. Skipping shuffle.")
-                return
-            os.replace(tmp_path, path)
-            print("Shuffle complete.")
-        finally:
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-
-    if do_shuffle:
-        _shuffle_inplace(out_file)
-    print("Done.")
+    logger.info(
+        "Completed packing: %d documents -> %d packed sequences of %d tokens (%s)",
+        docs_processed,
+        segments_written,
+        args.max_seq_len,
+        output_path,
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
-
-
+    raise SystemExit(main())
