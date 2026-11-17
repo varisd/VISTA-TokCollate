@@ -21,14 +21,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 DEFAULT_LANGS = ["eng_Latn", "spa_Latn", "deu_Latn", "rus_Cyrl", "cmn_Hani"]
-
-DEFAULT_RATIOS = {
-    "eng_Latn": 0.2,
-    "spa_Latn": 0.2,
-    "deu_Latn": 0.2,
-    "rus_Cyrl": 0.2,
-    "cmn_Hani": 0.2,
-}
+DEFAULT_RATIOS = {lang: 1. / len(DEFAULT_LANGS) for lang in DEFAULT_LANGS}
 
 TEMP_SHARD_SIZE_BYTES = 64 * 1024 * 1024
 COPY_BUFFER_BYTES = 16 * 1024 * 1024
