@@ -434,7 +434,7 @@ def main(args):
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    ratios_path = Path(f"{output_path.stem}.ratios.json")
+    ratios_path = output_path.with_name(f"{output_path.stem}.ratios.json")
     temp_base = resolve_temp_base(args.temp_dir, output_path)
 
     temp_dir = None
