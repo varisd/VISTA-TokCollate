@@ -356,42 +356,17 @@ def resolve_temp_base(cli_temp_dir, output_path: Path):
 def save_sampling_rates(
     ratios_path: Path,
     selected_langs: list[str],
-    planned_ratios: dict[str, float],
-    target_bytes_per_lang: dict[str, int],
     collected_bytes: dict[str, int],
-    args,
 ):
-    """Write planned and realized sampling rates to a JSON file for downstream tokenizer training."""
+    """Write actual sampled byte ratios per language to a JSON file."""
     total_collected = sum(collected_bytes.values())
     actual_ratios = {
         lang: (collected_bytes[lang] / total_collected if total_collected > 0 else 0.0)
         for lang in selected_langs
     }
 
-    payload = {
-        "ratio_mode": (
-            "natural"
-            if args.natural_ratios
-            else ("custom" if args.ratios else "uniform_default")
-        ),
-        "ratio_alpha": args.ratio_alpha if args.natural_ratios else None,
-        "target_total_bytes": args.target_bytes,
-        "actual_total_bytes": total_collected,
-        "planned_sampling_rates": planned_ratios,
-        "actual_sampling_rates": actual_ratios,
-        "per_language": {
-            lang: {
-                "planned_rate": planned_ratios[lang],
-                "actual_rate": actual_ratios[lang],
-                "target_bytes": target_bytes_per_lang[lang],
-                "collected_bytes": collected_bytes[lang],
-            }
-            for lang in selected_langs
-        },
-    }
-
     with open(ratios_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(actual_ratios, f, indent=2)
     logger.info("Saved language sampling rates to: %s", str(ratios_path.resolve()))
 
 
@@ -464,10 +439,7 @@ def main(args):
         save_sampling_rates(
             ratios_path=ratios_path,
             selected_langs=selected_langs,
-            planned_ratios=mixing_ratios,
-            target_bytes_per_lang=target_bytes_per_lang,
             collected_bytes=collected_bytes,
-            args=args,
         )
 
         if temp_dir is not None and temp_dir.exists():
