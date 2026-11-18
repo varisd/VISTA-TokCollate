@@ -19,6 +19,8 @@ DEFAULT_LANGS = ["eng_Latn", "spa_Latn", "deu_Latn", "rus_Cyrl", "cmn_Hani"]
 SPLITS = ["dev", "devtest"]
 LANG_ALIASES = {
     "cmn_Hani": "zho_Hans",  # FLORES-200 uses zho_Hans / zho_Hant instead of cmn_Hani
+    "ekk_Latn": "est_Latn",  # FLORES-200 uses est_Latn (macro-language) instead of ekk_Latn
+    "fas_Arab": "pes_Arab",  # FLORES-200 uses pes_Arab (Western Persian) instead of fas_Arab
 }
 
 
@@ -62,7 +64,7 @@ def main(args) -> int:
             return 1
 
         with tarfile.open(archive_path, "r:gz") as tar:
-            members = {m.name: m for m in tar.getmembers()}
+            members = {m.name.lstrip("./"): m for m in tar.getmembers()}
             available_langs = sorted(
                 Path(name).stem
                 for name in members
