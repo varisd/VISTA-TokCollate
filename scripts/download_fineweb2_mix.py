@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import logging
 import os
 import random
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 DEFAULT_LANGS = ["eng_Latn", "spa_Latn", "deu_Latn", "rus_Cyrl", "cmn_Hani"]
-DEFAULT_RATIOS = {lang: 1. / len(DEFAULT_LANGS) for lang in DEFAULT_LANGS}
+DEFAULT_RATIOS = {lang: 1.0 / len(DEFAULT_LANGS) for lang in DEFAULT_LANGS}
 
 TEMP_SHARD_SIZE_BYTES = 64 * 1024 * 1024
 COPY_BUFFER_BYTES = 16 * 1024 * 1024
@@ -136,7 +137,7 @@ def compute_natural_ratios(
     if "eng_Latn" in raw_sizes and non_eng:
         raw_sizes["eng_Latn"] = min(raw_sizes["eng_Latn"], max(non_eng) * 2)
 
-    weights = {l: (sz ** alpha) for l, sz in raw_sizes.items()}
+    weights = {l: (sz**alpha) for l, sz in raw_sizes.items()}
     total_w = sum(weights.values())
     return {l: weights[l] / total_w for l in selected_langs}
 
@@ -321,12 +322,7 @@ def write_language_shards(
 
 
 def merge_shards(shard_paths, output_path, rng=None, batch_size=MERGE_BATCH_SIZE):
-    """Merge temporary shards in their current order.
-
-    Download-time shuffling is intentionally omitted here; the full corpus shuffle is
-    performed later at the split stage, where it can be done with bounded memory and
-    without re-ordering only a few local shard batches.
-    """
+    """Merge temporary shards in their current order."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
 
@@ -355,6 +351,48 @@ def resolve_temp_base(cli_temp_dir, output_path: Path):
         return Path(hpc_tmpdir)
 
     return output_path.parent
+
+
+def save_sampling_rates(
+    ratios_path: Path,
+    selected_langs: list[str],
+    planned_ratios: dict[str, float],
+    target_bytes_per_lang: dict[str, int],
+    collected_bytes: dict[str, int],
+    args,
+):
+    """Write planned and realized sampling rates to a JSON file for downstream tokenizer training."""
+    total_collected = sum(collected_bytes.values())
+    actual_ratios = {
+        lang: (collected_bytes[lang] / total_collected if total_collected > 0 else 0.0)
+        for lang in selected_langs
+    }
+
+    payload = {
+        "ratio_mode": (
+            "natural"
+            if args.natural_ratios
+            else ("custom" if args.ratios else "uniform_default")
+        ),
+        "ratio_alpha": args.ratio_alpha if args.natural_ratios else None,
+        "target_total_bytes": args.target_bytes,
+        "actual_total_bytes": total_collected,
+        "planned_sampling_rates": planned_ratios,
+        "actual_sampling_rates": actual_ratios,
+        "per_language": {
+            lang: {
+                "planned_rate": planned_ratios[lang],
+                "actual_rate": actual_ratios[lang],
+                "target_bytes": target_bytes_per_lang[lang],
+                "collected_bytes": collected_bytes[lang],
+            }
+            for lang in selected_langs
+        },
+    }
+
+    with open(ratios_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    logger.info("Saved language sampling rates to: %s", str(ratios_path.resolve()))
 
 
 def main(args):
@@ -387,7 +425,7 @@ def main(args):
 
     logger.info("Planned composition of the output corpus:")
     for lang in selected_langs:
-        logger.info("  - %s: %.1f%%", lang, mixing_ratios[lang] * 100)
+        logger.info("  - %s: %.4f (%.2f%%)", lang, mixing_ratios[lang], mixing_ratios[lang] * 100)
     logger.info("Target size: %s bytes", f"{args.target_bytes:,}")
 
     target_bytes_per_lang = {
@@ -396,6 +434,7 @@ def main(args):
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    ratios_path = Path(f"{output_path.stem}.ratios.json")
     temp_base = resolve_temp_base(args.temp_dir, output_path)
 
     temp_dir = None
@@ -422,6 +461,15 @@ def main(args):
 
         merge_shards(shard_paths, output_path, rng=random.Random(), batch_size=MERGE_BATCH_SIZE)
 
+        save_sampling_rates(
+            ratios_path=ratios_path,
+            selected_langs=selected_langs,
+            planned_ratios=mixing_ratios,
+            target_bytes_per_lang=target_bytes_per_lang,
+            collected_bytes=collected_bytes,
+            args=args,
+        )
+
         if temp_dir is not None and temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
             logger.info("Deleted temporary shard directory: %s", temp_dir)
@@ -429,19 +477,24 @@ def main(args):
         if temp_dir is not None and temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    total_collected = sum(collected_bytes.values())
     logger.info("=== Done ===")
-    logger.info("Saved to: %s", str(output_path.resolve()))
+    logger.info("Saved corpus to: %s", str(output_path.resolve()))
+    logger.info("Saved ratios to: %s", str(ratios_path.resolve()))
     logger.info(
         "Total UTF-8 bytes collected: %s / %s",
-        f"{sum(collected_bytes.values()):,}",
+        f"{total_collected:,}",
         f"{args.target_bytes:,}",
     )
     for lang in selected_langs:
+        actual_rate = collected_bytes[lang] / total_collected if total_collected > 0 else 0.0
         logger.info(
-            "  - %s: %s bytes (target: %s)",
+            "  - %s: %s / %s bytes (planned: %.4f, actual: %.4f)",
             lang,
             f"{collected_bytes[lang]:,}",
             f"{target_bytes_per_lang[lang]:,}",
+            mixing_ratios[lang],
+            actual_rate,
         )
     return 0
 
