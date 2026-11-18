@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import argparse
-import json
 import logging
 import sys
+import tarfile
+import tempfile
+import urllib.request
 from pathlib import Path
-
-from datasets import get_dataset_config_names, load_dataset
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,8 +14,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Ungated mirror of FLORES-200 in native Parquet format (no HF login or script execution needed)
-DATASET_REPO = "Muennighoff/flores200"
+DATASET_URL = "https://dl.fbaipublicfiles.com/nllb/flores200_dataset.tar.gz"
 DEFAULT_LANGS = ["eng_Latn", "spa_Latn", "deu_Latn", "rus_Cyrl", "cmn_Hani"]
 SPLITS = ["dev", "devtest"]
 LANG_ALIASES = {
@@ -29,7 +28,7 @@ def resolve_lang_code(lang: str) -> str:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Download FLORES-200 evaluation splits (dev and devtest) from Hugging Face."
+        description="Download FLORES-200 evaluation splits (dev and devtest)."
     )
     parser.add_argument(
         "--languages",
@@ -41,52 +40,58 @@ def parse_args():
         "--output-dir",
         type=str,
         default="flores200",
-        help="Directory where downloaded .txt and .jsonl files will be saved.",
+        help="Directory where downloaded .txt files will be saved.",
     )
     return parser.parse_args()
 
 
-def get_monolingual_configs() -> list[str]:
-    configs = get_dataset_config_names(DATASET_REPO)
-    # Keep only single-language configs (exclude 'all' and hyphenated pairs like 'eng_Latn-ces_Latn')
-    return sorted(c for c in configs if c != "all" and "-" not in c)
-
-
 def main(args) -> int:
-    try:
-        available_langs = get_monolingual_configs()
-    except Exception as exc:
-        logger.error("Failed to fetch language list from '%s': %s", DATASET_REPO, exc)
-        return 1
-
     raw_langs = [l.strip() for l in args.languages.split(",") if l.strip()]
     selected_langs = [resolve_lang_code(l) for l in raw_langs]
-
-    invalid = [l for l in selected_langs if l not in available_langs]
-    if invalid:
-        logger.error(
-            "Invalid FLORES-200 language code(s): %s.",
-            ", ".join(invalid),
-        )
-        return 1
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for lang in selected_langs:
-        logger.info("Downloading %s from %s...", lang, DATASET_REPO)
-        ds = load_dataset(DATASET_REPO, lang)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        archive_path = Path(tmpdir) / "flores200_dataset.tar.gz"
+        logger.info("Downloading FLORES-200 archive from %s...", DATASET_URL)
+        try:
+            urllib.request.urlretrieve(DATASET_URL, archive_path)
+        except Exception as exc:
+            logger.error("Failed to download archive from '%s': %s", DATASET_URL, exc)
+            return 1
 
-        for split in SPLITS:
-            if split not in ds:
-                logger.warning("Split '%s' not found for %s. Skipping.", split, lang)
-                continue
+        with tarfile.open(archive_path, "r:gz") as tar:
+            members = {m.name: m for m in tar.getmembers()}
+            available_langs = sorted(
+                Path(name).stem
+                for name in members
+                if name.startswith("flores200_dataset/dev/") and name.endswith(".dev")
+            )
 
-            txt_path = out_dir / f"{lang}.{split}.txt"
-            sentences = [s.replace("\n", " ").strip() for s in ds[split]["sentence"]]
-            txt_path.write_text("\n".join(sentences) + "\n", encoding="utf-8")
+            invalid = [l for l in selected_langs if l not in available_langs]
+            if invalid:
+                logger.error(
+                    "Invalid FLORES-200 language code(s): %s.",
+                    ", ".join(invalid),
+                )
+                return 1
 
-            logger.info("  Saved %d sentences -> %s", len(split_data), txt_path.name)
+            for lang in selected_langs:
+                logger.info("Extracting %s...", lang)
+                for split in SPLITS:
+                    member_name = f"flores200_dataset/{split}/{lang}.{split}"
+                    if member_name not in members:
+                        logger.warning("Split '%s' not found for %s. Skipping.", split, lang)
+                        continue
+
+                    raw_text = tar.extractfile(members[member_name]).read().decode("utf-8")
+                    sentences = [line.replace("\n", " ").strip() for line in raw_text.splitlines()]
+
+                    txt_path = out_dir / f"{lang}.{split}.txt"
+                    txt_path.write_text("\n".join(sentences) + "\n", encoding="utf-8")
+
+                    logger.info("  Saved %d sentences -> %s", len(sentences), txt_path.name)
 
     logger.info("=== Done! All files saved to %s ===", out_dir.resolve())
     return 0
