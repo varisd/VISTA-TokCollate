@@ -17,7 +17,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from tokenizers import Tokenizer
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
@@ -115,13 +115,23 @@ def discover_languages(
     corpus_path: Path,
     max_lines: Optional[int] = None,
     max_bytes: Optional[int] = None,
-) -> List[str]:
-    """Scan TSV language tags within the configured slice."""
-    langs: dict[str, int] = {}
-    for lang, _ in iter_tsv_records(corpus_path, max_lines=max_lines, max_bytes=max_bytes):
-        langs[lang] = langs.get(lang, 0) + 1
-    logger.info("Discovered %d languages in TSV slice: %s", len(langs), langs)
-    return list(langs.keys())
+) -> Dict[str, int]:
+    """Scan TSV language tags and byte counts within the configured slice."""
+    lang_bytes: Dict[str, int] = {}
+    for lang, text in iter_tsv_records(corpus_path, max_lines=max_lines, max_bytes=max_bytes):
+        lang_bytes[lang] = lang_bytes.get(lang, 0) + len(text.encode("utf-8"))
+    logger.info("Discovered %d languages in TSV slice (UTF-8 bytes): %s", len(lang_bytes), lang_bytes)
+    return lang_bytes
+
+
+def load_ratios(ratios_path: Path) -> Dict[str, float]:
+    """Load flat {lang: ratio} mapping from a .ratios.json file."""
+    if not ratios_path.exists():
+        raise FileNotFoundError(f"Ratios file not found: {ratios_path}")
+    data = json.loads(ratios_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not data:
+        raise ValueError(f"Expected a non-empty JSON object in {ratios_path}")
+    return {str(k): float(v) for k, v in data.items() if float(v) > 0.0}
 
 
 def build_bytelevel_bpe() -> Tokenizer:
@@ -199,11 +209,33 @@ def train_parity_aware_bpe(
     batch_size: int,
     max_lines: Optional[int],
     max_bytes: Optional[int],
+    ratios_path: Optional[Path] = None,
     dev_corpus_path: Optional[Path] = None,
 ) -> None:
-    languages = discover_languages(corpus_path, max_lines=max_lines, max_bytes=max_bytes)
-    if not languages:
+    slice_lang_bytes = discover_languages(corpus_path, max_lines=max_lines, max_bytes=max_bytes)
+    if not slice_lang_bytes:
         raise ValueError(f"No languages found in {corpus_path}")
+
+    if ratios_path is not None:
+        corpus_ratios = load_ratios(ratios_path)
+        missing_in_slice = [lang for lang in corpus_ratios if lang not in slice_lang_bytes]
+        if missing_in_slice:
+            raise ValueError(
+                f"Languages present in {ratios_path} were absent from the {max_bytes}-byte training slice: "
+                f"{missing_in_slice}. Increase --max-bytes or use a pre-balanced training slice."
+            )
+        languages = [lang for lang in corpus_ratios if lang in slice_lang_bytes]
+        extra_in_slice = [lang for lang in slice_lang_bytes if lang not in corpus_ratios]
+        if extra_in_slice:
+            logger.warning("Languages in slice not listed in %s (will be ignored): %s", ratios_path, extra_in_slice)
+        ratios = [corpus_ratios[lang] for lang in languages]
+    else:
+        languages = list(slice_lang_bytes.keys())
+        total_slice_bytes = sum(slice_lang_bytes.values())
+        ratios = [slice_lang_bytes[lang] / total_slice_bytes for lang in languages]
+
+    logger.info("Parity-Aware BPE languages: %s", languages)
+    logger.info("Parity-Aware BPE target sampling ratios: %s", dict(zip(languages, ratios)))
 
     initial_alphabet = ByteLevel.alphabet()
     num_merges = max(0, vocab_size - len(special_tokens) - len(initial_alphabet))
@@ -238,7 +270,7 @@ def train_parity_aware_bpe(
             min_frequency=min_frequency,
             special_tokens=special_tokens,
             initial_alphabet=initial_alphabet,
-            ratio=[1.0] * len(languages),
+            ratio=ratios,
             show_progress=False,
         )
 
@@ -255,12 +287,14 @@ def add_hf_metadata(
     seed: int,
     max_bytes: Optional[int],
     max_lines: Optional[int],
+    ratios_path: Optional[Path] = None,
 ) -> None:
     config = {
         "tokenizer_class": tokenizer_type,
         "target_vocab_size": target_vocab_size,
         "actual_vocab_size": tokenizer.get_vocab_size(),
         "corpus": str(corpus_path),
+        "ratios_file": str(ratios_path) if ratios_path else None,
         "max_bytes": max_bytes,
         "max_lines": max_lines,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -276,6 +310,12 @@ def parse_args() -> argparse.Namespace:
         description="Train a tokenizer from a TSV corpus (bytes\tlanguage\ttext)."
     )
     parser.add_argument("--corpus", type=Path, required=True, help="Input .tsv corpus file.")
+    parser.add_argument(
+        "--ratios",
+        type=Path,
+        default=None,
+        help="Optional .ratios.json file mapping language codes to corpus proportions (used by parity_aware_bpe; ignored by bpe/wordpiece).",
+    )
     parser.add_argument(
         "--dev-corpus",
         type=Path,
@@ -317,8 +357,12 @@ def main() -> int:
 
     special_tokens = list(dict.fromkeys(args.special_tokens))
     tokenizer_type = args.tokenizer_type
+    ratios_path = args.ratios.resolve() if args.ratios else None
 
     logger.info("Training %s tokenizer (vocab_size=%d, max_bytes=%s)", tokenizer_type, args.vocab_size, args.max_bytes)
+    if ratios_path is not None and tokenizer_type != "parity_aware_bpe":
+        logger.info("--ratios is ignored for --tokenizer-type=%s.", tokenizer_type)
+
 
     if tokenizer_type == "bpe":
         tokenizer = build_bytelevel_bpe()
@@ -338,6 +382,7 @@ def main() -> int:
         train_parity_aware_bpe(
             tokenizer, corpus_path, args.vocab_size, args.min_frequency,
             special_tokens, args.batch_size, args.max_lines, args.max_bytes,
+            ratios_path=ratios_path,
             dev_corpus_path=dev_path,
         )
     else:
@@ -354,6 +399,7 @@ def main() -> int:
         seed=args.seed,
         max_bytes=args.max_bytes,
         max_lines=args.max_lines,
+        ratios_path=ratios_path if tokenizer_type == "parity_aware_bpe" else None,
     )
 
     logger.info("Saved tokenizer: %s", tokenizer_path)
