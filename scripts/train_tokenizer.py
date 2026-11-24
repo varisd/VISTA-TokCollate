@@ -227,10 +227,9 @@ def train_parity_aware_bpe(
         min_frequency=min_frequency,
         special_tokens=special_tokens,
         initial_alphabet=initial_alphabet,
-        ratio=ratios,
         show_progress=False,
     )
-    tokenizer.train_from_iterators(train_iterators, trainer=trainer)
+    trainer.train_from_iterator(tokenizer, train_iterators, ratio=ratios)
 
 
 def add_hf_metadata(
