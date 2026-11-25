@@ -435,48 +435,39 @@ def parse_args(args):
     
     # Tokenizer selection parameter
     parser.add_argument("--tokenizer_name", type=str, default="t5-base",
-                        help="Tokenizer model name to use (default: t5-base for backward compatibility)")
-    
-    
-    # Tokenizer selection (pretrained local monolingual tokenizers)
+                        help="Legacy tokenizer name or explicit path")
+    parser.add_argument("--tokenizer_path", type=str, default=None,
+                        help="Direct path to a tokenizer.json file or Hugging Face tokenizer directory")
+    parser.add_argument("--train_file", type=str, default=None,
+                        help="Packed ints-per-line training file (overrides pipeline data discovery)")
+    parser.add_argument("--eval_file", type=str, default=None,
+                        help="Packed ints-per-line evaluation file (optional)")
+    parser.add_argument("--dataset_name", type=str, default=None,
+                        help="Human-readable dataset name for logs and checkpoint metadata")
+
+    # Tokenizer selection (legacy and current pipeline names)
     parser.add_argument("--tokenizer_type", type=str, default="bpe_unscaled",
-                        choices=["bpe_unscaled", "unigram_unscaled"],
-                        help="Which monolingual tokenizer family to use")
+                        choices=["bpe_unscaled", "unigram_unscaled", "bpe", "wordpiece", "parity_aware_bpe"],
+                        help="Tokenizer family")
     parser.add_argument("--tokenizer_vocabulary", type=str, default="32768",
-                        choices=["8192","16384","32768","49152","65536","81920","98304","114688","262144"],
-                        help="Tokenizer vocabulary size for the selected tokenizer family")
-    
-    # Tokenizer pad token control
+                        help="Tokenizer vocabulary size")
+
+    parser.add_argument("--monolingual-dataset", type=str, default=None,
+                        help="Optional legacy monolingual/dataset name")
+
     def pad_token_type(value):
-        """Parse pad token argument - can be either special token keyword or custom string"""
+        """Parse a special-token keyword or custom pad-token string."""
         value_str = str(value).lower()
-        
-        # Special keywords for existing tokens
-        if value_str in ['eos', 'unk', 'bos']:
-            return value_str  # Return lowercase for consistency
-        else:
-            # Custom token string - return as-is (preserve case)
-            return str(value)
-    
+        if value_str in {'eos', 'unk', 'bos'}:
+            return value_str
+        return str(value)
+
     parser.add_argument("--pad_token", type=pad_token_type, default=None,
-                        help="Pad token to use. Can be: (1) Special token keywords: 'eos', 'unk', 'bos' - use existing special tokens, "
-                             "or (2) Custom string (e.g., '<PAD>', '<pad>', '[PADDING]') - will be added to vocabulary. Default: None (no modification)")
-    
-    # Positional embedding type control
-    parser.add_argument("--position_embedding_type", type=str, default="rope", 
+                        help="Pad token keyword (eos, unk, bos) or custom token")
+    parser.add_argument("--position_embedding_type", type=str, default="rope",
                         choices=["rope", "learned", "sinusoidal", "none"],
-                        help="Type of positional embeddings to use: 'rope' (RoPE, default), 'learned' (learnable absolute), "
-                             "'sinusoidal' (fixed sinusoidal), 'none' (no positional embeddings)")
-    
-    # Monolingual dataset selection
-    parser.add_argument("--monolingual-dataset", type=str, required=True,
-                        choices=["eng_latn", "tha_thai", "urd_arab", "amh_ethi", "vie_latn",
-                                 "fineweb_eng",
-                                 "fineweb2_amh", "fineweb2_tha", "fineweb2_urd", "fineweb2_vie"],
-                        help="Monolingual dataset to use for training. "
-                             "fineweb_eng uses eng_latn tokenizers with FineWeb data. "
-                             "fineweb2_* use corresponding language tokenizers with FineWeb-2 data.")
-    
+                        help="Type of positional embeddings")
+
     # Hugging Face Hub integration flags
     parser.add_argument("--hf_repo_name", type=str, default=None,
                         help="Hugging Face repository to push to (e.g., 'username/model-name')")
@@ -542,38 +533,28 @@ def evaluate_model(model, tokenizer, pad_idx, global_rank, world_size, device, b
     """
     Evaluate strictly on pre-tokenized eval split (ints-per-line) matching the training tokenizer.
     """
-    import math, os, json
-    assert monolingual_dataset is not None, "monolingual_dataset is required for eval"
+    import json
+    import os
+
     tokenized_root = f"{_DATA_ROOT}/monolingual_training_data_tokenized"
     bp_index_path = str(_REPO_ROOT / "configs" / "monolingual_bp_index.json")
-    with open(bp_index_path, 'r', encoding='utf-8') as f:
-        bp_index = json.load(f)
-    bp_index = {k: {**v, "train_path": v["train_path"].replace("${DATA_ROOT}", _DATA_ROOT), "eval_path": v["eval_path"].replace("${DATA_ROOT}", _DATA_ROOT)} for k, v in bp_index.items()}
-    # Use the same tokenizer basename as training to guarantee identical tokenizer/eval path
-    if hasattr(args, '_tokenizer_basename') and args._tokenizer_basename:
-        tokenizer_basename = args._tokenizer_basename
+    eval_path = getattr(args, "eval_file", None)
+    if eval_path:
+        eval_path = os.path.abspath(os.path.expanduser(eval_path))
     else:
-        tok_root_map = {
-            "bpe_unscaled": f"{_DATA_ROOT}/monolingual-tokenizers/bpe_unscaled_tokenizers",
-            "unigram_unscaled": f"{_DATA_ROOT}/monolingual-tokenizers/unigram_unscaled_tokenizers",
-        }
-        tok_root = tok_root_map[args.tokenizer_type]
-        _eval_tok_ds_map = {
-            "fineweb_eng": "eng_latn",
-            "fineweb2_amh": "amh_ethi",
-            "fineweb2_tha": "tha_thai",
-            "fineweb2_urd": "urd_arab",
-            "fineweb2_vie": "vie_latn",
-        }
-        _eval_tok_ds = _eval_tok_ds_map.get(monolingual_dataset, monolingual_dataset)
-        tok_file = (f"bpe_{_eval_tok_ds}_{args.tokenizer_vocabulary}_300mb_unscaled.json"
-                    if args.tokenizer_type == "bpe_unscaled"
-                    else f"unigram_{_eval_tok_ds}_{args.tokenizer_vocabulary}_300mb_unscaled.json")
-        tok_path = os.path.join(tok_root, tok_file)
-        tokenizer_basename = os.path.splitext(os.path.basename(tok_path))[0]
-    assert monolingual_dataset in bp_index, "Dataset missing in BP index for eval"
-    bp = bp_index[monolingual_dataset]["byte_premium"]
-    eval_path = os.path.join(tokenized_root, tokenizer_basename, f"{monolingual_dataset}_{bp}_eval_tokenized.txt")
+        if monolingual_dataset is None:
+            eval_path = None
+        elif os.path.isfile(bp_index_path):
+            with open(bp_index_path, 'r', encoding='utf-8') as f:
+                bp_index = json.load(f)
+            if monolingual_dataset in bp_index:
+                bp = bp_index[monolingual_dataset]["byte_premium"]
+                tokenizer_basename = getattr(args, '_tokenizer_basename', None)
+                if tokenizer_basename:
+                    eval_path = os.path.join(tokenized_root, tokenizer_basename, f"{monolingual_dataset}_{bp}_eval_tokenized.txt")
+
+    if not eval_path:
+        return 0.0, 0, None, None
     if not os.path.isfile(eval_path):
         raise FileNotFoundError(f"Pre-tokenized eval not found: {eval_path}")
 
@@ -703,30 +684,21 @@ def main(args):
     
     # Create tokenizer first
     # Resolve tokenizer path based on tokenizer_type and tokenizer_vocabulary if available
-    resolved_tokenizer_name = args.tokenizer_name
-    tok_root_map = {
-        "bpe_unscaled": f"{_DATA_ROOT}/monolingual-tokenizers/bpe_unscaled_tokenizers",
-        "unigram_unscaled": f"{_DATA_ROOT}/monolingual-tokenizers/unigram_unscaled_tokenizers",
-    }
-    _tok_dataset_map = {
-        "fineweb_eng": "eng_latn",
-        "fineweb2_amh": "amh_ethi",
-        "fineweb2_tha": "tha_thai",
-        "fineweb2_urd": "urd_arab",
-        "fineweb2_vie": "vie_latn",
-    }
-    if args.tokenizer_type in tok_root_map:
-        tok_root = tok_root_map[args.tokenizer_type]
-        _tok_ds = _tok_dataset_map.get(args.monolingual_dataset, args.monolingual_dataset)
-        tok_file = (f"bpe_{_tok_ds}_{args.tokenizer_vocabulary}_300mb_unscaled.json"
-                    if args.tokenizer_type == "bpe_unscaled"
-                    else f"unigram_{_tok_ds}_{args.tokenizer_vocabulary}_300mb_unscaled.json")
-        candidate = os.path.join(tok_root, tok_file)
-        if os.path.isfile(candidate):
-            resolved_tokenizer_name = candidate
-            logger.info(f"Resolved tokenizer file: {candidate}")
-        else:
-            logger.warning(f"Tokenizer file not found: {candidate}. Falling back to --tokenizer_name={args.tokenizer_name}")
+    resolved_tokenizer_name = args.tokenizer_path or args.tokenizer_name
+    if args.tokenizer_path:
+        resolved_tokenizer_name = os.path.expanduser(args.tokenizer_path)
+    else:
+        current_tokenizer_candidates = [
+            f"{_DATA_ROOT}/tokenizers/{args.tokenizer_type}.{args.tokenizer_type}.{args.tokenizer_vocabulary}/tokenizer.json",
+            f"{_DATA_ROOT}/tokenizers/tokenizer.{args.tokenizer_type}.{args.tokenizer_vocabulary}/tokenizer.json",
+            f"{_REPO_ROOT}/data/tokenizers/{args.tokenizer_type}.{args.tokenizer_type}.{args.tokenizer_vocabulary}/tokenizer.json",
+            f"{_REPO_ROOT}/data/tokenizers/tokenizer.{args.tokenizer_type}.{args.tokenizer_vocabulary}/tokenizer.json",
+        ]
+        for candidate in current_tokenizer_candidates:
+            if os.path.isfile(candidate):
+                resolved_tokenizer_name = candidate
+                logger.info(f"Resolved tokenizer file: {candidate}")
+                break
 
     logger.info(f"Loading tokenizer: {resolved_tokenizer_name}")
     def _prepare_tokenizer_dir(json_path: str) -> str:
@@ -804,19 +776,40 @@ def main(args):
     # Use pre-tokenized ints-per-line
     tokenized_root = f"{_DATA_ROOT}/monolingual_training_data_tokenized"
     tokenizer_basename = None
-    if os.path.isfile(resolved_tokenizer_name):
+    if args.tokenizer_path:
+        tokenizer_basename = os.path.splitext(os.path.basename(os.path.normpath(args.tokenizer_path).removesuffix(".json") if os.path.isfile(args.tokenizer_path) else args.tokenizer_path))[0]
+    elif os.path.isfile(resolved_tokenizer_name):
         tokenizer_basename = os.path.splitext(os.path.basename(resolved_tokenizer_name))[0]
-    # Persist tokenizer basename for eval to ensure exact match
     args._tokenizer_basename = tokenizer_basename
-    tokenized_train_path = None
-    if bp_index and args.monolingual_dataset in bp_index and tokenizer_basename:
-        bp = bp_index[args.monolingual_dataset]["byte_premium"]
-        candidate = os.path.join(tokenized_root, tokenizer_basename, f"{args.monolingual_dataset}_{bp}_tokenized.txt")
-        if os.path.isfile(candidate):
-            tokenized_train_path = candidate
-            logger.info(f"Using pre-tokenized training data: {tokenized_train_path}")
+
+    tokenized_train_path = os.path.abspath(os.path.expanduser(args.train_file)) if args.train_file else None
+    tokenized_eval_path = os.path.abspath(os.path.expanduser(args.eval_file)) if args.eval_file else None
+
     if tokenized_train_path is None:
-        raise FileNotFoundError("Pre-tokenized training data not found. Please run scripts/create_bp_splits.py and scripts/tokenize_and_pack.py first.")
+        for candidate in [
+            f"{_REPO_ROOT}/data/{Path(args.dataset_name or 'dataset').stem}.{args.tokenizer_type}.{args.tokenizer_vocabulary}.packed.txt",
+            f"{_DATA_ROOT}/{Path(args.dataset_name or 'dataset').stem}.{args.tokenizer_type}.{args.tokenizer_vocabulary}.packed.txt",
+        ]:
+            if os.path.isfile(candidate):
+                tokenized_train_path = candidate
+                break
+
+    if tokenized_train_path is None and bp_index and args.monolingual_dataset:
+        bp_entry = bp_index.get(args.monolingual_dataset)
+        if bp_entry and tokenizer_basename:
+            bp = bp_entry["byte_premium"]
+            candidate = os.path.join(tokenized_root, tokenizer_basename, f"{args.monolingual_dataset}_{bp}_tokenized.txt")
+            if os.path.isfile(candidate):
+                tokenized_train_path = candidate
+
+    if tokenized_train_path is None:
+        raise FileNotFoundError(
+            "Pre-tokenized training data not found. Pass --train_file or run scripts/tokenize_and_pack.py first."
+        )
+    if tokenized_eval_path is not None and not os.path.isfile(tokenized_eval_path):
+        raise FileNotFoundError(f"Pre-tokenized evaluation data not found: {tokenized_eval_path}")
+
+    logger.info(f"Using pre-tokenized training data: {tokenized_train_path}")
 
     # Determine dataset stats from pretokenized file only
     training_mode = "pretokenized ints-per-line"
@@ -880,7 +873,7 @@ def main(args):
         wandb.log({"dataset_size": dataset_size}, step=0)
 
     # Get vocab size for data validation - use len(tokenizer) to include all tokens
-    # (added special tokens like BOS/EOS may have IDs >= base vocab_size)
+    # (added special tokens like BOS/EOS may have IDs >= base_vocab_size)
     _vocab_size_for_validation = len(tokenizer)
 
     def create_dataset_for_epoch(epoch_num):
@@ -1602,7 +1595,7 @@ def main(args):
                 ### End muP code ###
                 
                 # Add byte tracking metrics if enabled
-                # (removed: dataset byte metrics)
+                # (removed: byte consumption plots)
                 
                 # Log activation distributions if tracking is enabled
                 # Log at first update step (initial state) and then every N update steps
