@@ -2,7 +2,7 @@
 
 import json
 import os
-import subprocess
+import sys
 from pathlib import Path
 
 from tokenizers import Tokenizer
@@ -12,7 +12,6 @@ from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
 
 
 def env_int(name: str, default: int) -> int:
@@ -70,8 +69,7 @@ def main() -> None:
     run_name = os.environ.get("RUN_NAME", "test_350m_dummy")
     save_dir = Path(os.environ.get("SAVE_DIR", str(PROJECT_ROOT / "checkpoints" / run_name)))
 
-    env = os.environ.copy()
-    env.update(
+    os.environ.update(
         {
             "CUDA_VISIBLE_DEVICES": devices,
             "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "8"),
@@ -81,62 +79,59 @@ def main() -> None:
         }
     )
 
-    command = [
-        str(PYTHON),
-        "-m",
-        "torch.distributed.run",
-        "--nproc_per_node",
-        str(num_gpus),
-        "--master_port",
-        master_port,
-        "torchrun_main.py",
-        "--model_config",
-        "configs/llama_350m.json",
-        "--lr",
-        "1e-3",
-        "--batch_size",
-        "16",
-        "--total_batch_size",
-        "512",
-        "--num_epochs",
-        "1",
-        "--warmup_steps_ratio",
-        "0.1",
-        "--weight_decay",
-        "0",
-        "--dtype",
-        "bfloat16",
-        "--eval_every",
-        "500",
-        "--optimizer",
-        "adam",
-        "--grad_clipping",
-        "1.0",
-        "--max_length",
-        "1024",
-        "--workers",
-        "0",
-        "--run_name",
-        run_name,
-        "--save_dir",
-        str(save_dir),
-        "--dataset_name",
-        "fineweb_eng",
-        "--monolingual-dataset",
-        "fineweb_eng",
-        "--tokenizer_path",
-        str(tokenizer_dir),
-        "--tokenizer_type",
-        "bpe",
-        "--tokenizer_vocabulary",
-        "32768",
-        "--train_file",
-        str(train_file),
-        "--eval_file",
-        str(eval_file),
-    ]
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from torchrun_main import launch_training
 
-    subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=True)
+    launch_training(
+        [
+            "--model_config",
+            "configs/llama_350m.json",
+            "--lr",
+            "1e-3",
+            "--batch_size",
+            "16",
+            "--total_batch_size",
+            "512",
+            "--num_epochs",
+            "1",
+            "--warmup_steps_ratio",
+            "0.1",
+            "--weight_decay",
+            "0",
+            "--dtype",
+            "bfloat16",
+            "--eval_every",
+            "500",
+            "--optimizer",
+            "adam",
+            "--grad_clipping",
+            "1.0",
+            "--max_length",
+            "1024",
+            "--workers",
+            "0",
+            "--run_name",
+            run_name,
+            "--save_dir",
+            str(save_dir),
+            "--dataset_name",
+            "fineweb_eng",
+            "--monolingual-dataset",
+            "fineweb_eng",
+            "--tokenizer_path",
+            str(tokenizer_dir),
+            "--tokenizer_type",
+            "bpe",
+            "--tokenizer_vocabulary",
+            "32768",
+            "--train_file",
+            str(train_file),
+            "--eval_file",
+            str(eval_file),
+        ],
+        num_gpus=num_gpus,
+        master_port=int(master_port),
+    )
 
 
 if __name__ == "__main__":

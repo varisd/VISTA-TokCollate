@@ -1,4 +1,5 @@
 import os
+from torch.distributed.launcher.api import LaunchConfig, elastic_launch
 import time
 import json
 import random
@@ -1612,6 +1613,8 @@ def main(args):
                         logger.info(
                             f"Logged {step_type} activation distributions at global_step {global_step}, update_step {update_step}"
                         )
+                                
+
                     except Exception as e:
                         logger.warning(f"Failed to log activation distributions: {e}")
                 
@@ -1791,6 +1794,27 @@ def main(args):
     
     logger.info("Script finished successfully")
     print(f"Rank {global_rank} finished successfully")
+
+    dist.destroy_process_group()
+
+
+def _distributed_worker(args):
+    main(args)
+
+
+def launch_training(args=None, num_gpus=None, master_port=None):
+    """Launch distributed training directly from Python, without a shell subprocess."""
+    num_gpus = num_gpus or int(os.environ.get("NUM_GPUS", "1"))
+    master_port = master_port or int(os.environ.get("MASTER_PORT", "29510"))
+    parsed_args = parse_args(args)
+    config = LaunchConfig(
+        min_nodes=1,
+        max_nodes=1,
+        nproc_per_node=num_gpus,
+        rdzv_backend="static",
+        rdzv_endpoint=f"localhost:{master_port}",
+    )
+    elastic_launch(config=config, entrypoint=_distributed_worker)(parsed_args)
 
 
 if __name__ == "__main__":
