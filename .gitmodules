@@ -6,3 +6,6 @@
 	path = oellm-eval
 	url = https://github.com/OpenEuroLLM/oellm-eval
 	branch = main
+[submodule "evolutionary-tokenizer"]
+	path = evolutionary-tokenizer
+	url = https://github.com/ufal/evolutionary-tokenizer
