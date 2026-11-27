@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from collections.abc import Iterator
@@ -24,6 +25,7 @@ DEFAULT_MAX_SEQ_LEN = 1024
 DEFAULT_BATCH_SIZE = 4096
 BOS_CANDIDATES = ("<bos>", "<cls>", "<s>")
 EOS_CANDIDATES = ("<eos>", "<sep>", "</s>")
+UNK_CANDIDATES = ("<UNK>", "<unk>")
 
 
 def iter_tsv_texts(path: Path) -> Iterator[str]:
@@ -70,6 +72,113 @@ def iter_batches(records: Iterator[str], batch_size: int) -> Iterator[list[str]]
             batch = []
     if batch:
         yield batch
+
+
+def load_evolutionary_vocabulary(vocabulary_path: Path) -> tuple[list[str], str, dict[str, float] | None]:
+    """Load evolutionary vocabulary.json and return (vocabulary, tokenizer_type, token_costs)."""
+    data = json.loads(vocabulary_path.read_text(encoding="utf-8"))
+    vocabulary = data.get("vocabulary")
+    if not isinstance(vocabulary, list) or not vocabulary:
+        raise ValueError(f"Invalid vocabulary payload in {vocabulary_path}")
+    tokenizer_type = str(data.get("tokenizer_type", "greedy"))
+    token_costs = data.get("token_costs")
+    if token_costs is not None and not isinstance(token_costs, dict):
+        raise ValueError(f"Invalid token_costs in {vocabulary_path}")
+    return vocabulary, tokenizer_type, token_costs
+
+
+def build_evolutionary_tokenizer(vocabulary: list[str], tokenizer_type: str, token_costs: dict[str, float] | None):
+    """Create a Rust-backed evolutionary tokenizer instance."""
+    try:
+        from tokenizer import GreedyTokenizer, PathPieceTokenizer  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "Could not import Rust tokenizer bindings. Build/install them in evolutionary-tokenizer "
+            "(for example: cd evolutionary-tokenizer && maturin develop --release)."
+        ) from exc
+
+    if tokenizer_type == "greedy":
+        return GreedyTokenizer(vocabulary)
+    if tokenizer_type == "pathpiece":
+        return PathPieceTokenizer(vocabulary, None, token_costs)
+    raise ValueError(f"Unsupported evolutionary tokenizer_type in vocabulary.json: {tokenizer_type}")
+
+
+def resolve_special_token_id_from_vocab(vocab_to_id: dict[str, int], candidates: tuple[str, ...]) -> int | None:
+    for token in candidates:
+        token_id = vocab_to_id.get(token)
+        if token_id is not None:
+            return token_id
+    return None
+
+
+def pack_tsv_to_token_ids_evolutionary(
+    *,
+    input_tsv: Path,
+    evolutionary_tokenizer,
+    vocab_to_id: dict[str, int],
+    output_path: Path,
+    max_seq_len: int = DEFAULT_MAX_SEQ_LEN,
+    max_segments: int = -1,
+    prepend_cls: bool = False,
+    include_sep: bool = False,
+) -> tuple[int, int]:
+    """Pack token IDs using evolutionary tokenizer vocabulary/token mapping."""
+    if not input_tsv.exists():
+        raise FileNotFoundError(f"Input TSV not found: {input_tsv}")
+    if max_seq_len <= 0:
+        raise ValueError("--max-seq-len must be positive.")
+
+    bos_id = resolve_special_token_id_from_vocab(vocab_to_id, BOS_CANDIDATES) if prepend_cls else None
+    eos_id = resolve_special_token_id_from_vocab(vocab_to_id, EOS_CANDIDATES) if include_sep else None
+    unk_id = resolve_special_token_id_from_vocab(vocab_to_id, UNK_CANDIDATES)
+
+    if prepend_cls and bos_id is None:
+        logger.warning("Requested --prepend-cls, but none of %s exist in vocabulary.", BOS_CANDIDATES)
+    if include_sep and eos_id is None:
+        logger.warning("Requested --include-sep, but none of %s exist in vocabulary.", EOS_CANDIDATES)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    buffer: list[int] = []
+    segments_written = 0
+    docs_processed = 0
+
+    with output_path.open("w", encoding="utf-8") as out_handle:
+        for text in iter_tsv_texts(input_tsv):
+            if max_segments > 0 and segments_written >= max_segments:
+                break
+
+            tokens = evolutionary_tokenizer.tokenize(text)
+            if not tokens:
+                continue
+
+            doc_ids: list[int] = []
+            for token in tokens:
+                token_id = vocab_to_id.get(token)
+                if token_id is None:
+                    if unk_id is None:
+                        raise ValueError(
+                            f"Tokenizer produced unknown token {token!r}, but vocabulary has no {UNK_CANDIDATES} token."
+                        )
+                    token_id = unk_id
+                doc_ids.append(token_id)
+
+            if bos_id is not None:
+                buffer.append(bos_id)
+            buffer.extend(doc_ids)
+            if eos_id is not None:
+                buffer.append(eos_id)
+            docs_processed += 1
+
+            while len(buffer) >= max_seq_len:
+                if max_segments > 0 and segments_written >= max_segments:
+                    break
+                chunk = buffer[:max_seq_len]
+                buffer = buffer[max_seq_len:]
+                out_handle.write(" ".join(map(str, chunk)) + "\n")
+                segments_written += 1
+
+    return docs_processed, segments_written
 
 
 def pack_tsv_to_token_ids(
@@ -156,7 +265,8 @@ def parse_args() -> argparse.Namespace:
         "--tokenizer-type",
         type=str,
         required=True,
-        help="Tokenizer family name (e.g. bpe, wordpiece, parity_aware_bpe).",
+        choices=["bpe", "wordpiece", "parity_aware_bpe", "evolutionary"],
+        help="Tokenizer family name.",
     )
     parser.add_argument(
         "--tokenizer-vocabulary",
@@ -203,11 +313,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    tokenizer_path = Path(
-        f"{args.tokenizer_prefix}.{args.tokenizer_type}.{args.tokenizer_vocabulary}/tokenizer.json"
+    tokenizer_dir = Path(
+        f"{args.tokenizer_prefix}.{args.tokenizer_type}.{args.tokenizer_vocabulary}"
     ).resolve()
-    if not tokenizer_path.exists():
-        raise FileNotFoundError(f"Tokenizer file not found: {tokenizer_path}")
+    if not tokenizer_dir.exists():
+        raise FileNotFoundError(f"Tokenizer directory not found: {tokenizer_dir}")
 
     output_path = (
         args.output
@@ -216,20 +326,46 @@ def main() -> int:
         / f"{args.input_tsv.stem}.{args.tokenizer_type}.{args.tokenizer_vocabulary}.packed.txt"
     )
 
-    logger.info("Loading tokenizer: %s", tokenizer_path)
-    tokenizer = Tokenizer.from_file(str(tokenizer_path))
-
     logger.info("Packing %s -> %s (max_seq_len=%d)", args.input_tsv, output_path, args.max_seq_len)
-    docs_processed, segments_written = pack_tsv_to_token_ids(
-        input_tsv=args.input_tsv.resolve(),
-        tokenizer=tokenizer,
-        output_path=output_path.resolve(),
-        max_seq_len=args.max_seq_len,
-        max_segments=args.max_segments,
-        prepend_cls=args.prepend_cls,
-        include_sep=args.include_sep,
-        batch_size=args.batch_size,
-    )
+
+    if args.tokenizer_type == "evolutionary":
+        vocabulary_path = (tokenizer_dir / "vocabulary.json").resolve()
+        if not vocabulary_path.exists():
+            raise FileNotFoundError(f"Evolutionary vocabulary file not found: {vocabulary_path}")
+
+        logger.info("Loading evolutionary tokenizer vocabulary: %s", vocabulary_path)
+        vocabulary, evolutionary_tokenizer_type, token_costs = load_evolutionary_vocabulary(vocabulary_path)
+        evo_tokenizer = build_evolutionary_tokenizer(vocabulary, evolutionary_tokenizer_type, token_costs)
+        vocab_to_id = {token: idx for idx, token in enumerate(vocabulary)}
+
+        docs_processed, segments_written = pack_tsv_to_token_ids_evolutionary(
+            input_tsv=args.input_tsv.resolve(),
+            evolutionary_tokenizer=evo_tokenizer,
+            vocab_to_id=vocab_to_id,
+            output_path=output_path.resolve(),
+            max_seq_len=args.max_seq_len,
+            max_segments=args.max_segments,
+            prepend_cls=args.prepend_cls,
+            include_sep=args.include_sep,
+        )
+    else:
+        tokenizer_path = (tokenizer_dir / "tokenizer.json").resolve()
+        if not tokenizer_path.exists():
+            raise FileNotFoundError(f"Tokenizer file not found: {tokenizer_path}")
+
+        logger.info("Loading tokenizer: %s", tokenizer_path)
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+
+        docs_processed, segments_written = pack_tsv_to_token_ids(
+            input_tsv=args.input_tsv.resolve(),
+            tokenizer=tokenizer,
+            output_path=output_path.resolve(),
+            max_seq_len=args.max_seq_len,
+            max_segments=args.max_segments,
+            prepend_cls=args.prepend_cls,
+            include_sep=args.include_sep,
+            batch_size=args.batch_size,
+        )
 
     logger.info(
         "Completed packing: %d documents -> %d packed sequences of %d tokens (%s)",
